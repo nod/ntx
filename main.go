@@ -8,6 +8,7 @@ import (
 	"github.com/nerdtx/ntx/internal/auth"
 	"github.com/nerdtx/ntx/internal/config"
 	"github.com/nerdtx/ntx/internal/db"
+	"github.com/nerdtx/ntx/internal/handlers"
 	"github.com/nerdtx/ntx/internal/models"
 	"github.com/nerdtx/ntx/internal/server"
 	"github.com/spf13/cobra"
@@ -21,8 +22,6 @@ func main() {
 }
 
 func rootCmd() *cobra.Command {
-	var cfgFile string
-
 	root := &cobra.Command{
 		Use:   "ntx",
 		Short: "personal site server",
@@ -32,6 +31,7 @@ func rootCmd() *cobra.Command {
 		Use:   "serve",
 		Short: "Start the HTTP server",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cfgFile, _ := cmd.Flags().GetString("config")
 			cfg, err := config.Load(cfgFile)
 			if err != nil {
 				return err
@@ -55,7 +55,36 @@ func rootCmd() *cobra.Command {
 			return srv.ListenAndServe()
 		},
 	}
-	serve.Flags().StringVar(&cfgFile, "config", "", "config file (default: ntx.toml)")
+	serve.Flags().String("config", "", "config file (default: ntx.toml)")
+
+	generate := &cobra.Command{
+		Use:   "generate",
+		Short: "Generate a static site from all content",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfgFile, _ := cmd.Flags().GetString("config")
+			outDir, _ := cmd.Flags().GetString("out")
+
+			cfg, err := config.Load(cfgFile)
+			if err != nil {
+				return err
+			}
+			database, err := db.Open(cfg.DBPath)
+			if err != nil {
+				return err
+			}
+			defer database.Close()
+
+			posts := models.NewPostStore(database)
+			session := auth.NewSessionManager(cfg.SessionSecret)
+			h, err := handlers.New(cfg, posts, session)
+			if err != nil {
+				return err
+			}
+			return h.Generate(outDir)
+		},
+	}
+	generate.Flags().String("config", "", "config file (default: ntx.toml)")
+	generate.Flags().String("out", "./out", "output directory")
 
 	hashPw := &cobra.Command{
 		Use:   "hash-password",
@@ -84,7 +113,7 @@ func rootCmd() *cobra.Command {
 		},
 	}
 
-	root.AddCommand(serve, hashPw, genConfig)
+	root.AddCommand(serve, generate, hashPw, genConfig)
 	return root
 }
 

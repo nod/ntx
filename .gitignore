@@ -1,6 +1,9 @@
 # binary
 ntx
 
+# static site output
+out/
+
 # config with secrets
 ntx.toml
 
