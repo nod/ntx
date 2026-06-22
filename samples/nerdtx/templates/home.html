@@ -1,0 +1,21 @@
+{{template "base.html" .}}
+
+{{define "title"}}{{.SiteName}} — technical projects{{end}}
+
+{{define "content"}}
+<section class="hero">
+  <div class="hero-inner">
+    <div class="hero-text">
+      <h1>technical projects<br>from deep in texas.</h1>
+      <p>open-source tools, curriculum, and platforms built for students, teachers, and developers who like getting their hands dirty.</p>
+      <div class="hero-links">
+        <a href="/projects" class="btn btn-cream">projects</a>
+        <a href="/blog" class="btn btn-outline-cream">blog</a>
+      </div>
+    </div>
+    <div class="hero-logo">
+      <img src="/static/assets/logo.svg" alt="{{.SiteName}} logo" width="300" height="200">
+    </div>
+  </div>
+</section>
+{{end}}

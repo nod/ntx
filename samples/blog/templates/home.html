@@ -1,0 +1,17 @@
+{{template "base.html" .}}
+
+{{define "title"}}{{.SiteName}}{{end}}
+
+{{define "content"}}
+<section class="home-hero">
+  <h1>{{.SiteName}}</h1>
+  <p class="lead">{{if .SiteDescription}}{{.SiteDescription}}{{else}}writing about software, systems, and things worth understanding.{{end}}</p>
+  <div class="home-actions">
+    <a href="/blog" class="btn btn-primary">read the writing</a>
+    <a href="/projects" class="btn">projects</a>
+  </div>
+</section>
+
+<hr class="home-divider">
+<p class="home-stream-label">writing lives at <a href="/blog">/blog</a> &mdash; projects at <a href="/projects">/projects</a></p>
+{{end}}

@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  {{if .SiteDescription}}<meta name="description" content="{{.SiteDescription}}">{{end}}
+  <title>{{block "title" .}}{{.SiteName}}{{end}}</title>
+  <link rel="stylesheet" href="/static/css/main.css">
+</head>
+<body>
+  <header>
+    <nav>
+      <a href="/" class="site-name">{{.SiteName}}</a>
+      <ul>
+        <li><a href="/blog">writing</a></li>
+        <li><a href="/projects">projects</a></li>
+        <li><a href="/about">about</a></li>
+      </ul>
+    </nav>
+  </header>
+  <main>
+    {{block "content" .}}{{end}}
+  </main>
+  <footer>
+    <p>&copy; {{.SiteURL}}</p>
+  </footer>
+  {{block "scripts" .}}{{end}}
+</body>
+</html>

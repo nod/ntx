@@ -1,0 +1,259 @@
+# ntx — usage guide
+
+`ntx` is a self-hosted personal site server: blog, projects, admin UI. It is not tied to any specific site — everything that appears in the browser comes from config and templates you supply.
+
+## Requirements
+
+- Go 1.21+
+- No CGo required (SQLite is pure-Go via `modernc.org/sqlite`)
+
+## Quick start
+
+```bash
+# 1. Clone / copy the ntx directory into your project
+# 2. Generate a bcrypt hash for your admin password
+ntx hash-password
+
+# 3. Generate a sample config and edit it
+ntx gen-config > ntx.toml
+$EDITOR ntx.toml
+
+# 4. Start the server
+ntx serve
+```
+
+## Configuration
+
+Config is resolved in this order (later wins):
+
+1. `--config <file>` flag (explicit path)
+2. `NTX_*` environment variables (e.g. `NTX_PORT=9000`)
+3. `./ntx.toml` in the working directory
+4. Built-in defaults
+
+### Full config reference
+
+```toml
+# Identity — shown in page titles, nav, footer
+site_name        = "mysite"          # default: "ntx"
+site_url         = "mysite.com"      # default: "localhost"
+site_description = "My personal site"
+
+# Paths
+static_path      = "./static"        # CSS, JS, images
+template_path    = "./templates"     # HTML templates
+db_path          = "./ntx.db"        # SQLite database
+
+# Server
+port             = 8080
+dev              = false             # true: re-reads templates on every request; no caching
+
+# Auth — both required
+admin_password_hash = ""  # bcrypt hash; run: ntx hash-password
+session_secret      = ""  # random string, min 32 chars; run: openssl rand -base64 32
+
+# Content
+about_slug = "about"  # /about redirects to /blog/<this slug>
+
+# Content sections (repeat block for each section)
+[[section]]
+slug  = "projects"
+title = "Projects"
+pages = [
+  { slug = "one", title = "Project One" },
+  { slug = "two", title = "Project Two" },
+]
+```
+
+### Generating secrets
+
+```bash
+# Admin password hash
+ntx hash-password    # prompts without echo, prints bcrypt hash
+
+# Session secret
+openssl rand -base64 32
+```
+
+## Template customization
+
+Templates live in `template_path` (default `./templates`). The directory structure is:
+
+```
+templates/
+  base.html              # layout: nav, footer, <head>
+  home.html              # /
+  blog/
+    index.html           # /blog  (tag filter, post list)
+    post.html            # /blog/<slug>
+  projects/
+    index.html           # /projects
+  admin/
+    login.html           # /admin/login
+    posts.html           # /admin/posts
+    editor.html          # /admin/posts/new  and  /admin/posts/<id>/edit
+```
+
+### Template data
+
+Every template receives these fields automatically (injected by the handler layer):
+
+| Field | Source | Example |
+|---|---|---|
+| `.SiteName` | `site_name` config | `"nerdtx"` |
+| `.SiteURL` | `site_url` config | `"nerdtx.net"` |
+| `.SiteDescription` | `site_description` config | `"technical projects from deep in texas"` |
+
+Page-specific fields are merged in alongside these. Check each handler in `internal/handlers/` for what extra keys each route provides (e.g. `.Posts`, `.Post`, `.Rendered`).
+
+Section pages receive additional fields — see [Content sections](#content-sections) below.
+
+### Replacing the logo
+
+The default templates reference `/static/assets/logo.svg`. Drop your own SVG there, or change the `src` attribute in `base.html` and `home.html`.
+
+## Static files
+
+Anything under `static_path` is served at `/static/`. The default layout:
+
+```
+static/
+  css/
+    main.css
+  assets/
+    logo.svg
+```
+
+You can add JS, fonts, images, etc. freely.
+
+## Blog posts
+
+Posts are written in Markdown (CommonMark + GitHub Flavored Markdown). Raw HTML in post bodies is stripped for safety. Create and edit posts via the admin UI at `/admin`.
+
+## Content sections
+
+Sections are arbitrary URL namespaces backed by static templates. Each section maps a slug to a directory of per-page templates. There is no index route — every URL is a named page.
+
+### Defining a section
+
+```toml
+[[section]]
+slug  = "projects"
+title = "Projects"
+pages = [
+  { slug = "one", title = "Project One" },
+  { slug = "two", title = "Project Two" },
+]
+```
+
+This registers:
+- `GET /projects/one` → `templates/sections/projects/one/index.html`
+- `GET /projects/two` → `templates/sections/projects/two/index.html`
+
+Unknown slugs 404 at the router level.
+
+### Multiple sections
+
+```toml
+[[section]]
+slug  = "projects"
+title = "Projects"
+pages = [
+  { slug = "ctfkit", title = "CTFKit" },
+]
+
+[[section]]
+slug  = "writing"
+title = "Writing"
+pages = [
+  { slug = "on-go", title = "On Go" },
+]
+```
+
+### Extra variables
+
+Any key added to a `[[section]]` block or a page entry is available in the template, flattened into the top-level data:
+
+```toml
+[[section]]
+slug   = "projects"
+title  = "Projects"
+banner = "hero.png"           # available as {{ .banner }}
+pages = [
+  { slug = "one", title = "Project One", year = "2024" },  # {{ .year }}
+]
+```
+
+Page-level vars override section-level vars with the same key. The standard site fields (`.SiteName`, `.SiteURL`, `.SiteDescription`) are always present.
+
+Section pages receive:
+
+| Field | Source |
+|---|---|
+| `.Title` | page `title` field |
+| `.SectionTitle` | section `title` field |
+| any extra key | extra vars from section or page (page wins on conflict) |
+
+### Template location
+
+```
+templates/
+  sections/
+    projects/
+      one/
+        index.html
+      two/
+        index.html
+    writing/
+      on-go/
+        index.html
+```
+
+Each `index.html` extends `base.html` in the usual way.
+
+## Deployment
+
+### Minimal systemd unit
+
+```ini
+[Unit]
+Description=ntx site server
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/ntx serve --config /etc/ntx/ntx.toml
+Restart=on-failure
+User=www-data
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Reverse proxy (nginx)
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name mysite.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+### File locations (recommended)
+
+```
+/usr/local/bin/ntx          # binary
+/etc/ntx/ntx.toml           # config (mode 600, owned by service user)
+/var/lib/ntx/ntx.db         # database
+/var/www/mysite/static/     # static files  → static_path
+/var/www/mysite/templates/  # templates     → template_path
+```
+
+## Dev mode
+
+Set `dev = true` (or `NTX_DEV=true`) to reload templates from disk on every request — no restart needed when editing HTML.

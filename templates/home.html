@@ -1,0 +1,18 @@
+{{template "base.html" .}}
+
+{{define "title"}}{{.SiteName}}{{end}}
+
+{{define "content"}}
+<section class="hero">
+  <div class="hero-inner">
+    <div class="hero-text">
+      <h1>{{.SiteName}}</h1>
+      <p>{{if .SiteDescription}}{{.SiteDescription}}{{else}}welcome.{{end}}</p>
+      <div class="hero-links">
+        <a href="/blog" class="btn btn-cream">blog</a>
+        <a href="/projects" class="btn btn-outline-cream">projects</a>
+      </div>
+    </div>
+  </div>
+</section>
+{{end}}

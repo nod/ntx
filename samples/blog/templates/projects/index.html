@@ -1,0 +1,28 @@
+{{template "base.html" .}}
+
+{{define "title"}}projects — {{.SiteName}}{{end}}
+
+{{define "content"}}
+<section class="projects-header">
+  <h1>projects</h1>
+  <p>open-source tools, experiments, and things built in the open.</p>
+</section>
+
+<ul class="project-list">
+  <li>
+    <span class="project-name"><a href="https://github.com/example/ntx">ntx</a></span>
+    <a href="https://github.com/example/ntx" class="project-link">github &rarr;</a>
+    <p class="project-desc">personal site server. blog, projects, admin. one binary, no framework.</p>
+  </li>
+  <li>
+    <span class="project-name"><a href="https://github.com/example/ctfkit">ctfkit</a></span>
+    <a href="https://github.com/example/ctfkit" class="project-link">github &rarr;</a>
+    <p class="project-desc">self-hosted CTF platform for classroom and club competitions. docker-native, runs anywhere.</p>
+  </li>
+  <li>
+    <span class="project-name"><a href="https://github.com/example/shellspace">shellspace</a></span>
+    <a href="https://github.com/example/shellspace" class="project-link">github &rarr;</a>
+    <p class="project-desc">shell config manager. sync dotfiles, share profiles, bootstrap a new machine in under a minute.</p>
+  </li>
+</ul>
+{{end}}

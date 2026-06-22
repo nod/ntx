@@ -1,0 +1,48 @@
+# ntx.sample.toml — copy to ntx.toml and fill in the required fields
+#
+# Required secrets:
+#   admin_password_hash  →  ntx hash-password
+#   session_secret       →  openssl rand -base64 32
+
+# Site identity
+site_name        = "mysite"
+site_url         = "mysite.com"
+site_description = "My personal site."
+
+# Paths (relative to working directory)
+static_path   = "./static"
+template_path = "./templates"
+db_path       = "./ntx.db"
+
+# Server
+port = 8080
+dev  = false   # true: templates re-read from disk on every request (no restart needed)
+
+# Auth — required, no defaults
+admin_password_hash = ""   # bcrypt hash; run: ntx hash-password
+session_secret      = ""   # random string, min 32 chars; run: openssl rand -base64 32
+
+# /about redirects to /blog/<about_slug>
+about_slug = "about"
+
+# Content sections
+# Each [[section]] registers routes: /{slug}/{page-slug}
+# Templates live at: templates/sections/{slug}/{page-slug}/index.html
+#
+# Extra keys on [[section]] or on a page entry are passed to the template
+# as top-level variables (page keys override section keys on conflict).
+
+[[section]]
+slug  = "projects"
+title = "Projects"
+pages = [
+  { slug = "one", title = "Project One" },
+  { slug = "two", title = "Project Two" },
+]
+
+# [[section]]
+# slug  = "writing"
+# title = "Writing"
+# pages = [
+#   { slug = "essay-one", title = "Some Essay", year = "2024" },
+# ]

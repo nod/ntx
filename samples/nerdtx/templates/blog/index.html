@@ -1,0 +1,36 @@
+{{template "base.html" .}}
+
+{{define "title"}}blog — {{.SiteName}}{{end}}
+
+{{define "content"}}
+<section class="blog-index">
+  <h1>blog</h1>
+
+  {{if .AllTags}}
+  <div class="tag-filter">
+    <a href="/blog" class="tag{{if not .ActiveTag}} active{{end}}">all</a>
+    {{range .AllTags}}
+    <a href="/blog?tag={{.}}" class="tag{{if eq . $.ActiveTag}} active{{end}}">{{.}}</a>
+    {{end}}
+  </div>
+  {{end}}
+
+  {{if .Posts}}
+  <ul class="post-list">
+    {{range .Posts}}
+    <li>
+      <a href="/blog/{{.Slug}}">{{.Title}}</a>
+      <span class="date">{{.CreatedAt.Format "2006-01-02"}}</span>
+      {{if .Tags}}
+      <span class="tags">
+        {{range .Tags}}<a href="/blog?tag={{.}}" class="tag">{{.}}</a>{{end}}
+      </span>
+      {{end}}
+    </li>
+    {{end}}
+  </ul>
+  {{else}}
+  <p class="empty">no posts yet.</p>
+  {{end}}
+</section>
+{{end}}

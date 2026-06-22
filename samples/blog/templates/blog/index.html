@@ -1,0 +1,37 @@
+{{template "base.html" .}}
+
+{{define "title"}}writing — {{.SiteName}}{{end}}
+
+{{define "content"}}
+<section class="blog-header">
+  <h1>writing</h1>
+  <p>essays, notes, and things worth putting down.</p>
+</section>
+
+{{if .AllTags}}
+<div class="tag-filter">
+  <a href="/blog" class="tag{{if not .ActiveTag}} active{{end}}">all</a>
+  {{range .AllTags}}
+  <a href="/blog?tag={{.}}" class="tag{{if eq . $.ActiveTag}} active{{end}}">{{.}}</a>
+  {{end}}
+</div>
+{{end}}
+
+{{if .Posts}}
+<ul class="post-list">
+  {{range .Posts}}
+  <li>
+    <p class="post-title"><a href="/blog/{{.Slug}}">{{.Title}}</a></p>
+    <div class="post-meta">
+      <time>{{.CreatedAt.Format "2 Jan 2006"}}</time>
+      {{if .Tags}}
+        {{range .Tags}}<a href="/blog?tag={{.}}" class="tag">{{.}}</a>{{end}}
+      {{end}}
+    </div>
+  </li>
+  {{end}}
+</ul>
+{{else}}
+<p class="empty">nothing here yet.</p>
+{{end}}
+{{end}}

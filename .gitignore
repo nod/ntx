@@ -1,0 +1,18 @@
+# binary
+ntx
+
+# config with secrets
+ntx.toml
+
+# database
+*.db
+*.db-wal
+*.db-shm
+
+# Go build artifacts
+*.test
+*.out
+
+# OS
+.DS_Store
+Thumbs.db

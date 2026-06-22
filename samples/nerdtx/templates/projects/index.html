@@ -1,0 +1,15 @@
+{{template "base.html" .}}
+
+{{define "title"}}projects — {{.SiteName}}{{end}}
+
+{{define "content"}}
+<section class="projects-index">
+  <h1>projects</h1>
+  <ul class="project-list">
+    <li>
+      <a href="/projects/ctfkit">CTFKit</a>
+      <p>self-hosted CTF platform</p>
+    </li>
+  </ul>
+</section>
+{{end}}
