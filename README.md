@@ -1,0 +1,115 @@
+# ntx
+
+A self-hosted personal site server. Blog, content sections, admin UI — configured via a single TOML file and HTML templates you supply. Can also generate a static site for deployment anywhere.
+
+## Install
+
+```sh
+curl -sSf https://raw.githubusercontent.com/nerdtx/ntx/main/install.sh | sh
+```
+
+Installs to `~/.local/bin` by default. Requires a pre-built release binary or Go 1.21+ as a fallback.
+
+```sh
+# pin a version
+NTX_VERSION=v0.7.1 curl -sSf https://raw.githubusercontent.com/nerdtx/ntx/main/install.sh | sh
+
+# install to a different location
+INSTALL_DIR=/usr/local/bin curl -sSf https://raw.githubusercontent.com/nerdtx/ntx/main/install.sh | sh
+```
+
+## Quick start
+
+```sh
+# generate a starter config
+ntx gen-config > ntx.toml
+
+# set a password hash and session secret
+ntx hash-password          # paste the output into ntx.toml as admin_password_hash
+openssl rand -base64 32    # paste into ntx.toml as session_secret
+
+# start the server
+ntx serve
+```
+
+Admin UI is at `/admin`. Blog posts are written in Markdown.
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `ntx serve` | Start the HTTP server |
+| `ntx generate` | Write a static site to `./out` |
+| `ntx hash-password` | Generate a bcrypt hash for `ntx.toml` |
+| `ntx gen-config` | Print a sample `ntx.toml` to stdout |
+| `ntx version` | Print the version and exit |
+
+`ntx generate --out <dir>` and `ntx serve --config <file>` accept flags — run `ntx <command> --help` for details.
+
+## Configuration
+
+Everything lives in `ntx.toml`:
+
+```toml
+site_name        = "mysite"
+site_url         = "mysite.com"
+site_description = "My personal site."
+
+static_path   = "./static"
+template_path = "./templates"
+db_path       = "./ntx.db"
+port          = 8080
+dev           = false
+
+admin_password_hash = ""   # ntx hash-password
+session_secret      = ""   # openssl rand -base64 32
+about_slug          = "about"
+```
+
+See [`docs/ntx.sample.toml`](docs/ntx.sample.toml) for a full annotated example.
+
+## Content sections
+
+Sections are arbitrary URL namespaces backed by static templates — no database involved.
+
+```toml
+[[section]]
+slug  = "projects"
+title = "Projects"
+pages = [
+  { slug = "ctfkit", title = "CTFKit", year = "2024" },
+]
+```
+
+`GET /projects/ctfkit` renders `templates/sections/projects/ctfkit/index.html`. Extra keys (`year`, etc.) are passed to the template as top-level variables.
+
+## Static site generation
+
+```sh
+ntx generate --out ./out
+```
+
+Renders home, blog, and all section pages to disk. Copies static assets. Output can be served by nginx, S3, Cloudflare Pages, or any static host.
+
+## Templates
+
+Templates live in `./templates` (configurable). Every template is parsed with `base.html` as the layout. Set `dev = true` to reload templates from disk on every request without restarting.
+
+See [`docs/usage.md`](docs/usage.md) for the full template directory structure and available template variables.
+
+## Building from source
+
+Requires Go 1.21+.
+
+```sh
+just build          # builds ./build/ntx for the current platform
+just build-all      # builds linux/darwin × amd64/arm64 into ./build/
+just test
+just run-dev        # starts server with dev=true
+```
+
+## Documentation
+
+- [`docs/usage.md`](docs/usage.md) — full usage guide
+- [`docs/ai-context.md`](docs/ai-context.md) — codebase reference for AI assistants
+- [`docs/ntx.sample.toml`](docs/ntx.sample.toml) — annotated sample config

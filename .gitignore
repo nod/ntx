@@ -1,5 +1,6 @@
-# binary
+# binaries
 ntx
+build/
 
 # static site output
 out/
