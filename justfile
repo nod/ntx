@@ -1,5 +1,3 @@
-version := `cat VERSION`
-
 ntx_version := `cat VERSION`
 ldflags := "-X main.version=" + ntx_version
 
@@ -14,7 +12,7 @@ build-all:
     mkdir -p build
     for os in linux darwin; do
         for arch in amd64 arm64; do
-            out="build/ntx_${os}_${arch}"
+            out="build/ntx-${os}-${arch}"
             printf 'building %s...\n' "$out"
             GOOS=$os GOARCH=$arch go build -ldflags "{{ldflags}}" -o "$out" .
         done

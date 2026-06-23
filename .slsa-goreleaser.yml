@@ -1,0 +1,24 @@
+version: 2
+
+env:
+  - VERSION
+  - COMMIT
+  - COMMIT_DATE
+  - TREE_STATE
+
+flags:
+  - -trimpath
+
+ldflags:
+  - -X main.version={{ .Env.VERSION }}
+
+goos:
+  - linux
+  - darwin
+
+goarch:
+  - amd64
+  - arm64
+
+binary: ntx
+main: .

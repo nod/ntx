@@ -73,7 +73,7 @@ install_binary() {
     arch="$2"
     ver="$3"
 
-    name="ntx_${os}_${arch}"
+    name="ntx-${os}-${arch}"
     url="https://github.com/$REPO/releases/download/$ver/$name"
     tmp=$(mktemp)
 
