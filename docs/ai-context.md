@@ -24,10 +24,11 @@ internal/
   db/migrations/               # .sql migration files
   auth/auth.go                 # bcrypt password check, session management
   models/post.go               # PostStore: CRUD for blog posts
-  handlers/handler.go          # TemplateCache, Handler struct, render()
+  handlers/handler.go          # TemplateCache, Handler struct, render(), renderToBytes()
   handlers/home.go             # GET /
   handlers/blog.go             # GET /blog, GET /blog/{slug}
   handlers/projects.go         # GET /{section}/{page} (content sections)
+  handlers/generate.go         # h.Generate() — static site output
   handlers/admin.go            # /admin/* routes (auth-gated)
   server/server.go             # chi router wiring
 templates/                     # HTML templates (user-supplied)
@@ -91,6 +92,14 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, name string, da
 
 Always merges `siteData()` (SiteName, SiteURL, SiteDescription) with the provided `data` map before executing. Page data wins on key collision with site data.
 
+### renderToBytes()
+
+```go
+func (h *Handler) renderToBytes(name string, data map[string]interface{}) ([]byte, error)
+```
+
+Same merge logic as `render()` but returns the result as `[]byte` instead of writing to a `ResponseWriter`. Used by the static site generator. Defined in `handlers/generate.go`.
+
 ### siteData()
 
 Returns:
@@ -142,8 +151,8 @@ Section routes are registered dynamically at startup by iterating `cfg.Sections`
 | Key | Type | Value |
 |---|---|---|
 | `.Posts` | `[]models.Post` | published posts, newest first |
-| `.Tag` | string | active tag filter (empty if none) |
-| `.Tags` | `[]string` | all tags across all posts |
+| `.ActiveTag` | string | active tag filter (empty if none) |
+| `.AllTags` | `[]string` | all tags across all posts |
 
 ### `/blog/{slug}`
 
@@ -194,6 +203,24 @@ Session-based. `SessionManager` stores session tokens in SQLite with expiry. The
 - `home.html` is at the root of `template_path`.
 
 Templates use standard Go `html/template`. One template function is registered: `join` (wraps `strings.Join`).
+
+## Static site generation (`internal/handlers/generate.go`)
+
+`h.Generate(outDir string) error` writes all public pages to disk. Call sequence:
+
+1. Home → `{outDir}/index.html`
+2. Blog index (published posts, no tag filter) → `{outDir}/blog/index.html`
+3. Each published post → `{outDir}/blog/{slug}/index.html`
+4. Each section page (from `cfg.Sections`) → `{outDir}/{section}/{page}/index.html`
+5. Copy `cfg.StaticPath` → `{outDir}/static/`
+
+Section pages whose templates are missing log a warning and are skipped; the build continues. Admin routes and the `/about` redirect are not generated.
+
+URL-to-file mapping: `/foo/bar` → `{outDir}/foo/bar/index.html`, `/` → `{outDir}/index.html`.
+
+The `generate` CLI command (`main.go`) accepts `--out` (default `./out`) and `--config`. The `out/` directory is gitignored.
+
+**Tag filtering is not static-compatible.** `generate` only writes the unfiltered blog index. Do not generate per-tag pages without first adding support for it.
 
 ## How to add a new hard-coded route
 

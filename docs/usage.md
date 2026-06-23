@@ -18,8 +18,11 @@ ntx hash-password
 ntx gen-config > ntx.toml
 $EDITOR ntx.toml
 
-# 4. Start the server
+# 4a. Start the live server
 ntx serve
+
+# 4b. Or generate a static site
+ntx generate --out ./out
 ```
 
 ## Configuration
@@ -86,8 +89,10 @@ templates/
   blog/
     index.html           # /blog  (tag filter, post list)
     post.html            # /blog/<slug>
-  projects/
-    index.html           # /projects
+  sections/              # content sections (see below)
+    projects/
+      one/
+        index.html       # /projects/one
   admin/
     login.html           # /admin/login
     posts.html           # /admin/posts
@@ -210,6 +215,54 @@ templates/
 ```
 
 Each `index.html` extends `base.html` in the usual way.
+
+## Static site generation
+
+`ntx generate` renders all public pages to disk as plain HTML files and copies static assets. The output can be served by any static host (nginx, S3, Cloudflare Pages, etc.).
+
+```bash
+ntx generate                        # writes to ./out
+ntx generate --out /var/www/html    # custom output dir
+ntx generate --config prod.toml --out ./dist
+```
+
+### What gets generated
+
+| URL | Output file |
+|---|---|
+| `/` | `out/index.html` |
+| `/blog` | `out/blog/index.html` |
+| `/blog/<slug>` | `out/blog/<slug>/index.html` |
+| `/<section>/<page>` | `out/<section>/<page>/index.html` |
+| `static/**` | `out/static/**` (copied verbatim) |
+
+Admin routes are not generated. The `/about` redirect belongs in your web server config, not the static output.
+
+Section pages whose templates don't exist are warned and skipped — the rest of the build continues.
+
+### Blog tag filtering
+
+Tag filter links (`?tag=X`) in the blog index won't work in a static deploy without JavaScript or pre-generating one page per tag. For now, `generate` produces only the unfiltered blog index. If you need per-tag pages, either handle them client-side or avoid tag filter links in your static template.
+
+### Static nginx config
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name mysite.com;
+
+    root /var/www/out;
+    index index.html;
+
+    location /about {
+        return 302 /blog/about-slug;
+    }
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+```
 
 ## Deployment
 
