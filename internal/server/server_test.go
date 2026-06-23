@@ -68,10 +68,58 @@ func setupTemplates(t *testing.T, dir string) {
 	write("home.html", `{{template "base.html" .}}{{define "content"}}home{{end}}`)
 	write("blog/index.html", `{{template "base.html" .}}{{define "content"}}blog-index{{end}}`)
 	write("blog/post.html", `{{template "base.html" .}}{{define "content"}}{{.Post.Title}}{{end}}`)
-	write("projects/index.html", `{{template "base.html" .}}{{define "content"}}projects{{end}}`)
 	write("admin/login.html", `{{template "base.html" .}}{{define "content"}}login{{if .Error}} error:{{.Error}}{{end}}{{end}}`)
 	write("admin/posts.html", `{{template "base.html" .}}{{define "content"}}posts-admin{{end}}`)
 	write("admin/editor.html", `{{template "base.html" .}}{{define "content"}}editor{{end}}`)
+}
+
+func setupServerWithSections(t *testing.T) (*httptest.Server, *models.PostStore) {
+	t.Helper()
+
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+
+	tmpDir := t.TempDir()
+	setupTemplates(t, tmpDir)
+
+	// section template
+	sectionTmpl := filepath.Join(tmpDir, "sections/projects/one/index.html")
+	os.MkdirAll(filepath.Dir(sectionTmpl), 0755)
+	os.WriteFile(sectionTmpl, []byte(`{{template "base.html" .}}{{define "content"}}project-one{{end}}`), 0644)
+
+	hash, _ := auth.HashPassword("testpass")
+	cfg := &config.Config{
+		TemplatePath:      tmpDir,
+		StaticPath:        tmpDir,
+		AboutSlug:         "about-page",
+		AdminPasswordHash: hash,
+		SessionSecret:     "testsecretkey12345678901234567890",
+		Dev:               true,
+		Sections: []config.Section{
+			{
+				Slug:  "projects",
+				Title: "Projects",
+				Pages: []config.SectionPage{
+					{Slug: "one", Title: "Project One"},
+				},
+			},
+		},
+	}
+
+	posts := models.NewPostStore(database)
+	session := auth.NewSessionManager(cfg.SessionSecret)
+
+	srv, err := New(cfg, posts, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(srv.Handler)
+	t.Cleanup(ts.Close)
+	return ts, posts
 }
 
 func TestHomeRoute(t *testing.T) {
@@ -158,9 +206,9 @@ func TestBlogPostPublished(t *testing.T) {
 	}
 }
 
-func TestProjectsIndex(t *testing.T) {
-	ts, _ := setupServer(t)
-	resp, err := http.Get(ts.URL + "/projects")
+func TestSectionPage(t *testing.T) {
+	ts, _ := setupServerWithSections(t)
+	resp, err := http.Get(ts.URL + "/projects/one")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,14 +217,25 @@ func TestProjectsIndex(t *testing.T) {
 	}
 }
 
-func TestProjectPage404(t *testing.T) {
-	ts, _ := setupServer(t)
+func TestSectionPageNotInConfig(t *testing.T) {
+	ts, _ := setupServerWithSections(t)
 	resp, err := http.Get(ts.URL + "/projects/nonexistent")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestSectionUnknownNamespace(t *testing.T) {
+	ts, _ := setupServer(t)
+	resp, err := http.Get(ts.URL + "/projects/one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for unconfigured section, got %d", resp.StatusCode)
 	}
 }
 
