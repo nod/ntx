@@ -15,6 +15,8 @@ import (
 	"golang.org/x/term"
 )
 
+var version = "dev"
+
 func main() {
 	if err := rootCmd().Execute(); err != nil {
 		os.Exit(1)
@@ -113,7 +115,15 @@ func rootCmd() *cobra.Command {
 		},
 	}
 
-	root.AddCommand(serve, generate, hashPw, genConfig)
+	versionCmd := &cobra.Command{
+		Use:   "version",
+		Short: "Print the version and exit",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println(version)
+		},
+	}
+
+	root.AddCommand(serve, generate, hashPw, genConfig, versionCmd)
 	return root
 }
 

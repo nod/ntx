@@ -1,7 +1,9 @@
+version := `cat VERSION`
+
 default: build
 
 build:
-    go build -o build/ntx .
+    go build -ldflags "-X main.version={{version}}" -o build/ntx .
 
 test:
     go test ./...
