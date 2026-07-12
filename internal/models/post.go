@@ -132,20 +132,22 @@ func (s *PostStore) Create(p *Post) error {
 }
 
 func (s *PostStore) Update(p *Post) error {
-	r := dbPost{ID: uint(p.ID)}
-	if err := s.db.Model(&r).Updates(map[string]any{
-		"slug":      p.Slug,
-		"title":     p.Title,
-		"body":      p.Body,
-		"published": p.Published,
-	}).Error; err != nil {
-		return err
-	}
 	tags, err := s.resolveTags(p.Tags)
 	if err != nil {
 		return err
 	}
-	return s.db.Model(&r).Association("Tags").Replace(tags)
+	r := dbPost{ID: uint(p.ID)}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&r).Updates(map[string]any{
+			"slug":      p.Slug,
+			"title":     p.Title,
+			"body":      p.Body,
+			"published": p.Published,
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&r).Association("Tags").Replace(tags)
+	})
 }
 
 func (s *PostStore) Delete(id int64) error {
