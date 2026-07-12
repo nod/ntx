@@ -60,8 +60,8 @@ session_secret      = "supersecretkey1234567890abcdef12"
 	if cfg.Port != 8080 {
 		t.Errorf("default port: want 8080, got %d", cfg.Port)
 	}
-	if cfg.DBPath != "./ntx.db" {
-		t.Errorf("default db_path: want ./ntx.db, got %q", cfg.DBPath)
+	if cfg.DBDSN != "sqlite://./ntx.db" {
+		t.Errorf("default db_dsn: want sqlite://./ntx.db, got %q", cfg.DBDSN)
 	}
 	if cfg.TemplatePath != "./templates" {
 		t.Errorf("default template_path: want ./templates, got %q", cfg.TemplatePath)

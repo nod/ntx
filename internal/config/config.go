@@ -22,7 +22,7 @@ type Section struct {
 
 type Config struct {
 	StaticPath        string    `mapstructure:"static_path"`
-	DBPath            string    `mapstructure:"db_path"`
+	DBDSN             string    `mapstructure:"db_dsn"`
 	Port              int       `mapstructure:"port"`
 	TemplatePath      string    `mapstructure:"template_path"`
 	AboutSlug         string    `mapstructure:"about_slug"`
@@ -39,7 +39,7 @@ func Load(cfgFile string) (*Config, error) {
 	v := viper.New()
 
 	v.SetDefault("static_path", "./static")
-	v.SetDefault("db_path", "./ntx.db")
+	v.SetDefault("db_dsn", "sqlite://./ntx.db")
 	v.SetDefault("port", 8080)
 	v.SetDefault("template_path", "./templates")
 	v.SetDefault("about_slug", "about")
