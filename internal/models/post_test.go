@@ -8,11 +8,14 @@ import (
 
 func newTestDB(t *testing.T) *PostStore {
 	t.Helper()
-	database, err := db.Open(":memory:")
+	database, err := db.Open("sqlite://:memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { database.Close() })
+	t.Cleanup(func() {
+		sqlDB, _ := database.DB()
+		sqlDB.Close()
+	})
 	return NewPostStore(database)
 }
 
