@@ -1,101 +1,94 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"embed"
 	"fmt"
-	"sort"
-	"strconv"
+	"io/fs"
 	"strings"
-	"time"
 
-	_ "modernc.org/sqlite"
+	glebsqlite "github.com/glebarez/sqlite"
+	"github.com/pressly/goose/v3"
+	gormpostgres "gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
-//go:embed migrations/*.sql
-var migrationsFS embed.FS
+//go:embed migrations/sqlite/*.sql
+var sqliteMigrations embed.FS
 
-func Open(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path+"?_foreign_keys=on&_journal_mode=WAL")
+//go:embed migrations/postgres/*.sql
+var postgresMigrations embed.FS
+
+func Open(dsn string) (*gorm.DB, error) {
+	switch {
+	case strings.HasPrefix(dsn, "sqlite://"):
+		return openSQLite(strings.TrimPrefix(dsn, "sqlite://"))
+	case strings.HasPrefix(dsn, "postgres://"), strings.HasPrefix(dsn, "postgresql://"):
+		return openPostgres(dsn)
+	default:
+		return nil, fmt.Errorf("unsupported DSN scheme (want sqlite:// or postgres://): %s", dsn)
+	}
+}
+
+func openSQLite(path string) (*gorm.DB, error) {
+	db, err := gorm.Open(glebsqlite.Open(path), &gorm.Config{})
 	if err != nil {
-		return nil, fmt.Errorf("opening db: %w", err)
+		return nil, fmt.Errorf("opening sqlite: %w", err)
 	}
-	db.SetMaxOpenConns(1)
-
-	if err := migrate(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrating: %w", err)
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, err
 	}
-
+	sqlDB.SetMaxOpenConns(1)
+	if err := db.Exec("PRAGMA foreign_keys = ON").Error; err != nil {
+		sqlDB.Close()
+		return nil, err
+	}
+	if path != ":memory:" {
+		if err := db.Exec("PRAGMA journal_mode = WAL").Error; err != nil {
+			sqlDB.Close()
+			return nil, err
+		}
+	}
+	sub, err := fs.Sub(sqliteMigrations, "migrations/sqlite")
+	if err != nil {
+		sqlDB.Close()
+		return nil, err
+	}
+	if err := runMigrations(sqlDB, goose.DialectSQLite3, sub); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("sqlite migrations: %w", err)
+	}
 	return db, nil
 }
 
-func migrate(db *sql.DB) error {
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
-		version    INTEGER PRIMARY KEY,
-		applied_at INTEGER NOT NULL
-	)`); err != nil {
-		return err
+func openPostgres(dsn string) (*gorm.DB, error) {
+	db, err := gorm.Open(gormpostgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		return nil, fmt.Errorf("opening postgres: %w", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, err
+	}
+	sub, err := fs.Sub(postgresMigrations, "migrations/postgres")
+	if err != nil {
+		sqlDB.Close()
+		return nil, err
+	}
+	if err := runMigrations(sqlDB, goose.DialectPostgres, sub); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("postgres migrations: %w", err)
+	}
+	return db, nil
+}
 
-	rows, err := db.Query(`SELECT version FROM schema_migrations ORDER BY version`)
+func runMigrations(sqlDB *sql.DB, dialect goose.Dialect, migrations fs.FS) error {
+	provider, err := goose.NewProvider(dialect, sqlDB, migrations)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	applied := map[int]bool{}
-	for rows.Next() {
-		var v int
-		if err := rows.Scan(&v); err != nil {
-			return err
-		}
-		applied[v] = true
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	entries, err := migrationsFS.ReadDir("migrations")
-	if err != nil {
-		return err
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-
-	for _, e := range entries {
-		name := e.Name()
-		if !strings.HasSuffix(name, ".sql") {
-			continue
-		}
-		versionStr := strings.SplitN(name, "_", 2)[0]
-		version, err := strconv.Atoi(versionStr)
-		if err != nil {
-			return fmt.Errorf("parsing migration version from %s: %w", name, err)
-		}
-		if applied[version] {
-			continue
-		}
-
-		content, err := migrationsFS.ReadFile("migrations/" + name)
-		if err != nil {
-			return err
-		}
-
-		tx, err := db.Begin()
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(string(content)); err != nil {
-			tx.Rollback()
-			return fmt.Errorf("running migration %s: %w", name, err)
-		}
-		if _, err := tx.Exec(`INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`, version, time.Now().Unix()); err != nil {
-			tx.Rollback()
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	_, err = provider.Up(context.Background())
+	return err
 }
