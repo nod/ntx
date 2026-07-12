@@ -1,0 +1,26 @@
+-- +goose Up
+CREATE TABLE IF NOT EXISTS posts (
+    id          INTEGER  PRIMARY KEY AUTOINCREMENT,
+    slug        TEXT     NOT NULL UNIQUE,
+    title       TEXT     NOT NULL,
+    body        TEXT     NOT NULL,
+    published   INTEGER  NOT NULL DEFAULT 0,
+    created_at  DATETIME NOT NULL,
+    updated_at  DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tags (
+    id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT    NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS post_tags (
+    post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    tag_id  INTEGER NOT NULL REFERENCES tags(id)  ON DELETE CASCADE,
+    PRIMARY KEY (post_id, tag_id)
+);
+
+-- +goose Down
+DROP TABLE IF EXISTS post_tags;
+DROP TABLE IF EXISTS tags;
+DROP TABLE IF EXISTS posts;
