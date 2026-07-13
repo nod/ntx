@@ -27,7 +27,7 @@ func (l *loginLimiter) allow(ip string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	cutoff := time.Now().Add(-15 * time.Minute)
-	recent := l.attempts[ip][:0]
+	var recent []time.Time
 	for _, t := range l.attempts[ip] {
 		if t.After(cutoff) {
 			recent = append(recent, t)
