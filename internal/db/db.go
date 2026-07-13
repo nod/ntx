@@ -12,7 +12,10 @@ import (
 	"github.com/pressly/goose/v3"
 	gormpostgres "gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
+
+var silentLogger = logger.Default.LogMode(logger.Silent)
 
 //go:embed migrations/sqlite/*.sql
 var sqliteMigrations embed.FS
@@ -32,7 +35,7 @@ func Open(dsn string) (*gorm.DB, error) {
 }
 
 func openSQLite(path string) (*gorm.DB, error) {
-	db, err := gorm.Open(glebsqlite.Open(path), &gorm.Config{})
+	db, err := gorm.Open(glebsqlite.Open(path), &gorm.Config{Logger: silentLogger})
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite: %w", err)
 	}
@@ -64,7 +67,7 @@ func openSQLite(path string) (*gorm.DB, error) {
 }
 
 func openPostgres(dsn string) (*gorm.DB, error) {
-	db, err := gorm.Open(gormpostgres.Open(dsn), &gorm.Config{})
+	db, err := gorm.Open(gormpostgres.Open(dsn), &gorm.Config{Logger: silentLogger})
 	if err != nil {
 		return nil, fmt.Errorf("opening postgres: %w", err)
 	}
