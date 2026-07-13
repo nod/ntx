@@ -96,6 +96,7 @@ type Handler struct {
 	posts     *models.PostStore
 	session   *auth.SessionManager
 	templates *TemplateCache
+	limiter   *loginLimiter
 }
 
 func New(cfg *config.Config, posts *models.PostStore, session *auth.SessionManager) (*Handler, error) {
@@ -108,6 +109,7 @@ func New(cfg *config.Config, posts *models.PostStore, session *auth.SessionManag
 		posts:     posts,
 		session:   session,
 		templates: tc,
+		limiter:   newLoginLimiter(),
 	}, nil
 }
 
