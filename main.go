@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/nerdtx/ntx/internal/auth"
 	"github.com/nerdtx/ntx/internal/config"
@@ -60,8 +64,21 @@ func rootCmd() *cobra.Command {
 				return err
 			}
 
-			log.Printf("listening on %s", srv.Addr)
-			return srv.ListenAndServe()
+			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
+
+			go func() {
+				log.Printf("listening on %s", srv.Addr)
+				if err := srv.ListenAndServe(); err != nil {
+					log.Printf("server stopped: %v", err)
+				}
+			}()
+
+			<-ctx.Done()
+			log.Printf("shutting down...")
+			shutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			return srv.Shutdown(shutCtx)
 		},
 	}
 	serve.Flags().String("config", "", "config file (default: ntx.toml)")
