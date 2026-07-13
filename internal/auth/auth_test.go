@@ -23,7 +23,7 @@ func TestHashAndCheck(t *testing.T) {
 }
 
 func TestSessionRoundtrip(t *testing.T) {
-	sm := NewSessionManager("supersecretkey1234567890abcdef12")
+	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
 
 	w := httptest.NewRecorder()
 	sm.SetSession(w)
@@ -43,7 +43,7 @@ func TestSessionRoundtrip(t *testing.T) {
 }
 
 func TestSessionTampering(t *testing.T) {
-	sm := NewSessionManager("supersecretkey1234567890abcdef12")
+	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
 
 	w := httptest.NewRecorder()
 	sm.SetSession(w)
@@ -62,7 +62,7 @@ func TestSessionTampering(t *testing.T) {
 }
 
 func TestSessionMissing(t *testing.T) {
-	sm := NewSessionManager("supersecretkey1234567890abcdef12")
+	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	if sm.IsAuthenticated(req) {
 		t.Error("unauthenticated request passed")
@@ -70,8 +70,8 @@ func TestSessionMissing(t *testing.T) {
 }
 
 func TestDifferentSecrets(t *testing.T) {
-	sm1 := NewSessionManager("secret-one-1234567890abcdef1234")
-	sm2 := NewSessionManager("secret-two-1234567890abcdef1234")
+	sm1 := NewSessionManager("secret-one-1234567890abcdef1234", false)
+	sm2 := NewSessionManager("secret-two-1234567890abcdef1234", false)
 
 	w := httptest.NewRecorder()
 	sm1.SetSession(w)
@@ -86,7 +86,7 @@ func TestDifferentSecrets(t *testing.T) {
 }
 
 func TestMiddlewareRedirects(t *testing.T) {
-	sm := NewSessionManager("supersecretkey1234567890abcdef12")
+	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
 
 	handler := sm.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -102,7 +102,7 @@ func TestMiddlewareRedirects(t *testing.T) {
 }
 
 func TestClearSession(t *testing.T) {
-	sm := NewSessionManager("supersecretkey1234567890abcdef12")
+	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
 
 	w := httptest.NewRecorder()
 	sm.SetSession(w)
@@ -123,7 +123,7 @@ func TestClearSession(t *testing.T) {
 }
 
 func TestSessionExpiry(t *testing.T) {
-	sm := NewSessionManager("supersecretkey1234567890abcdef12")
+	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
 
 	// Build a valid-signature cookie with an issuedAt > 24h ago.
 	expired := time.Now().Add(-25 * time.Hour).Unix()

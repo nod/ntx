@@ -53,7 +53,7 @@ func rootCmd() *cobra.Command {
 			defer sqlDB.Close()
 
 			posts := models.NewPostStore(database)
-			session := auth.NewSessionManager(cfg.SessionSecret)
+			session := auth.NewSessionManager(cfg.SessionSecret, !cfg.Dev)
 
 			srv, err := server.New(cfg, posts, session)
 			if err != nil {
@@ -88,7 +88,7 @@ func rootCmd() *cobra.Command {
 			defer sqlDB.Close()
 
 			posts := models.NewPostStore(database)
-			session := auth.NewSessionManager(cfg.SessionSecret)
+			session := auth.NewSessionManager(cfg.SessionSecret, !cfg.Dev)
 			h, err := handlers.New(cfg, posts, session)
 			if err != nil {
 				return err

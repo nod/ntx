@@ -43,7 +43,7 @@ func setupServer(t *testing.T) (*httptest.Server, *models.PostStore) {
 	}
 
 	posts := models.NewPostStore(database)
-	session := auth.NewSessionManager(cfg.SessionSecret)
+	session := auth.NewSessionManager(cfg.SessionSecret, false)
 
 	srv, err := New(cfg, posts, session)
 	if err != nil {
@@ -116,7 +116,7 @@ func setupServerWithSections(t *testing.T) (*httptest.Server, *models.PostStore)
 	}
 
 	posts := models.NewPostStore(database)
-	session := auth.NewSessionManager(cfg.SessionSecret)
+	session := auth.NewSessionManager(cfg.SessionSecret, false)
 
 	srv, err := New(cfg, posts, session)
 	if err != nil {

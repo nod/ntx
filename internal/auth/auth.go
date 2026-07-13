@@ -22,10 +22,11 @@ var ErrInvalidSession = errors.New("invalid session")
 
 type SessionManager struct {
 	secret []byte
+	secure bool
 }
 
-func NewSessionManager(secret string) *SessionManager {
-	return &SessionManager{secret: []byte(secret)}
+func NewSessionManager(secret string, secure bool) *SessionManager {
+	return &SessionManager{secret: []byte(secret), secure: secure}
 }
 
 func CheckPassword(hash, password string) error {
@@ -49,16 +50,20 @@ func (sm *SessionManager) SetSession(w http.ResponseWriter) {
 		HttpOnly: true,
 		MaxAge:   int(sessionMaxAge.Seconds()),
 		SameSite: http.SameSiteStrictMode,
+		Secure:   sm.secure,
 	})
 }
 
 func (sm *SessionManager) ClearSession(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
-		Name:    cookieName,
-		Value:   "",
-		Path:    "/",
-		MaxAge:  -1,
-		Expires: time.Unix(0, 0),
+		Name:     cookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		MaxAge:   -1,
+		Expires:  time.Unix(0, 0),
+		SameSite: http.SameSiteStrictMode,
+		Secure:   sm.secure,
 	})
 }
 
