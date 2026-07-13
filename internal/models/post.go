@@ -2,11 +2,15 @@ package models
 
 import (
 	"errors"
+	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
 	"gorm.io/gorm"
 )
+
+var slugRe = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
 // Post is the public type. Tags are []string for template/handler compatibility.
 type Post struct {
@@ -111,6 +115,9 @@ func (s *PostStore) GetByID(id int64) (*Post, error) {
 }
 
 func (s *PostStore) Create(p *Post) error {
+	if !slugRe.MatchString(p.Slug) {
+		return fmt.Errorf("invalid slug %q: must match %s", p.Slug, slugRe)
+	}
 	tags, err := s.resolveTags(p.Tags)
 	if err != nil {
 		return err
@@ -132,6 +139,9 @@ func (s *PostStore) Create(p *Post) error {
 }
 
 func (s *PostStore) Update(p *Post) error {
+	if !slugRe.MatchString(p.Slug) {
+		return fmt.Errorf("invalid slug %q: must match %s", p.Slug, slugRe)
+	}
 	tags, err := s.resolveTags(p.Tags)
 	if err != nil {
 		return err
