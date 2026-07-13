@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ntx — Hostile Security &amp; Code Quality Evaluation</title>
+<style>
+  :root {
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --text:#e6edf3; --muted:#8b949e;
+    --border:#30363d; --code:#0b0f14;
+    --crit:#f85149; --high:#ff9800; --med:#e3b341; --low:#58a6ff; --info:#8b949e; --good:#3fb950;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:1000px; margin:0 auto; padding:32px 20px 80px; }
+  h1 { font-size:26px; margin:0 0 4px; }
+  h2 { font-size:20px; margin:38px 0 14px; padding-bottom:8px; border-bottom:1px solid var(--border); }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  .summary { display:flex; flex-wrap:wrap; gap:10px; margin:20px 0 8px; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:8px;
+    padding:12px 16px; min-width:110px; text-align:center; }
+  .card .n { font-size:26px; font-weight:700; display:block; }
+  .card .l { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+  .finding { background:var(--panel); border:1px solid var(--border);
+    border-radius:6px; padding:14px 18px; margin:14px 0; }
+  .finding h3 { margin:0 0 6px; font-size:16px; }
+  .loc { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12.5px;
+    color:var(--low); margin-bottom:8px; word-break:break-all; }
+  .badge { display:inline-block; font-size:11px; font-weight:700; letter-spacing:.05em;
+    padding:2px 8px; border-radius:4px; text-transform:uppercase; margin-right:8px; vertical-align:2px; }
+  .b-crit{background:var(--crit);color:#fff;} .b-high{background:var(--high);color:#241a00;}
+  .b-med{background:var(--med);color:#241a00;} .b-low{background:var(--low);color:#04121f;}
+  .b-info{background:var(--info);color:#0d1117;} .b-good{background:var(--good);color:#04140a;}
+  .f-crit{background:linear-gradient(var(--panel),var(--panel)) padding-box, #22161a;}
+  .f-high{background:#221b12;} .f-med{background:#211f13;}
+  .f-low{background:#141b25;} .f-info{background:var(--panel);} .f-good{background:#101d14;}
+  pre { background:var(--code); border:1px solid var(--border); border-radius:6px;
+    padding:10px 12px; overflow-x:auto; font:12.5px/1.5 ui-monospace,Menlo,Consolas,monospace;
+    margin:10px 0 4px; }
+  code { font-family:ui-monospace,Menlo,Consolas,monospace; background:var(--panel2);
+    padding:1px 5px; border-radius:4px; font-size:12.5px; }
+  pre code { background:none; padding:0; }
+  .fix { color:var(--good); }
+  .lbl { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.05em; margin-top:8px; }
+  p { margin:6px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ntx — Hostile Security &amp; Code Quality Evaluation</h1>
+  <p class="sub">Full Go source read. <code>go vet ./...</code> clean. <code>go test ./...</code> passes but handlers/ and db/ have <strong>zero tests</strong>. No TODO/FIXME markers, no <code>Sprintf</code>-based SQL. The real problems are in defaults, HTTP hardening, and session design.</p>
+
+  <div class="summary">
+    <div class="card"><span class="n" style="color:var(--crit)">2</span><span class="l">Critical</span></div>
+    <div class="card"><span class="n" style="color:var(--high)">6</span><span class="l">High</span></div>
+    <div class="card"><span class="n" style="color:var(--med)">7</span><span class="l">Medium</span></div>
+    <div class="card"><span class="n" style="color:var(--low)">6</span><span class="l">Low</span></div>
+    <div class="card"><span class="n" style="color:var(--info)">6</span><span class="l">Info</span></div>
+  </div>
+
+  <!-- ============ CRITICAL ============ -->
+  <h2>Critical</h2>
+
+  <div class="finding f-crit">
+    <h3><span class="badge b-crit">Critical</span>Session cookie never sets <code>Secure</code>, so the auth token leaks over plaintext HTTP</h3>
+    <div class="loc">internal/auth/auth.go:45-52 (SetSession), :55-62 (ClearSession)</div>
+    <p>The HTTP server (<code>server.go</code>) serves plain HTTP with no TLS and no redirect-to-HTTPS. The session cookie is set with <code>HttpOnly</code> and <code>SameSite=Strict</code> but <strong>never <code>Secure</code></strong>. Any network observer (open Wi-Fi, upstream proxy, misconfigured reverse proxy dropping to HTTP) captures the admin session token in cleartext and replays it for the full 24h window. There is no config flag to force it either.</p>
+    <pre><code>http.SetCookie(w, &http.Cookie{
+    Name:     cookieName,
+    Value:    value,
+    Path:     "/",
+    HttpOnly: true,
+    MaxAge:   int(sessionMaxAge.Seconds()),
+    SameSite: http.SameSiteStrictMode,   // Secure: MISSING
+})</code></pre>
+    <p class="fix">Fix: add <code>Secure: !cfg.Dev</code> (or an explicit config toggle). ClearSession should mirror the same attributes so intermediaries don't reject the clear.</p>
+  </div>
+
+  <div class="finding f-crit">
+    <h3><span class="badge b-crit">Critical</span>Stateless session tokens cannot be revoked, so "logout" is cosmetic</h3>
+    <div class="loc">internal/auth/auth.go:55-63 (ClearSession), :89-112 (verify)</div>
+    <p>The session token is a self-contained HMAC over only an <code>issuedAt</code> timestamp. There is no server-side session store, no nonce, no revocation list, no password-change invalidation. <code>ClearSession</code> only deletes the <em>client's</em> cookie. If a token is ever captured (see the <code>Secure</code> finding above), logging out does nothing. The stolen token stays valid for the full 24 hours regardless. Rotating the admin password also does <em>not</em> invalidate live sessions, because the token isn't bound to the password hash.</p>
+    <pre><code>payload := base64(fmt.Sprintf("%d", issuedAt))   // only the timestamp
+value  := payload + "." + sm.sign(payload)        // any valid HMAC = admin</code></pre>
+    <p class="fix">Fix: bind the token to a server-side secret that rotates on logout/password-change, or include a hash of the current password in the signed payload so a password change kills all sessions. At minimum add a random nonce persisted server-side.</p>
+  </div>
+
+  <!-- ============ HIGH ============ -->
+  <h2>High</h2>
+
+  <div class="finding f-high">
+    <h3><span class="badge b-high">High</span>No HTTP server timeouts, allowing trivial Slowloris DoS</h3>
+    <div class="loc">internal/server/server.go:54-57</div>
+    <p>The <code>http.Server</code> is constructed with only <code>Addr</code> and <code>Handler</code>. <code>ReadTimeout</code>, <code>ReadHeaderTimeout</code>, <code>WriteTimeout</code>, and <code>IdleTimeout</code> are all zero (unlimited). A handful of slow clients holding connections open indefinitely will exhaust the server. This is worse here than usual because SQLite runs with <code>SetMaxOpenConns(1)</code>, so a single stuck request holding the DB serializes everything.</p>
+    <pre><code>return &http.Server{
+    Addr:    fmt.Sprintf(":%d", cfg.Port),
+    Handler: r,
+}, nil   // no timeouts at all</code></pre>
+    <p class="fix">Fix: set <code>ReadHeaderTimeout: 10*time.Second</code>, <code>ReadTimeout</code>, <code>WriteTimeout</code>, <code>IdleTimeout</code>.</p>
+  </div>
+
+  <div class="finding f-high">
+    <h3><span class="badge b-high">High</span>No security response headers anywhere</h3>
+    <div class="loc">internal/handlers/handler.go:122-140 (render), internal/server/server.go:21-23</div>
+    <p>No middleware or handler sets <code>Content-Security-Policy</code>, <code>X-Content-Type-Options: nosniff</code>, <code>X-Frame-Options</code>/frame-ancestors, or <code>Referrer-Policy</code>. The admin editor and blog render user/markdown-derived content. Without a CSP, any XSS that slips past goldmark's escaping (or a future template that trusts input) is unmitigated, and the admin panel is clickjackable.</p>
+    <p class="fix">Fix: add a security-headers middleware. At least <code>nosniff</code>, <code>frame-ancestors 'none'</code>, and a restrictive <code>default-src 'self'</code> CSP.</p>
+  </div>
+
+  <div class="finding f-high">
+    <h3><span class="badge b-high">High</span>No CSRF protection on admin mutations</h3>
+    <div class="loc">internal/handlers/admin.go:17,60,84 &amp; internal/server/server.go:44-52</div>
+    <p>All admin state changes are <code>POST</code> with no CSRF token: login, create, update, delete, logout. The only defense is the cookie's <code>SameSite=Strict</code>. That is a real mitigation for modern browsers, but it is a single point of failure. It does nothing for older browsers, and any future need to loosen SameSite (e.g. embedding, OAuth callback) instantly reopens CSRF. Notably <code>logout</code> being CSRF-able lets an attacker force-logout the admin, and login CSRF can fixate a session.</p>
+    <p class="fix">Fix: add a per-session CSRF token (hidden form field checked server-side) in addition to SameSite. Defense in depth.</p>
+  </div>
+
+  <div class="finding f-high">
+    <h3><span class="badge b-high">High</span>No rate limiting or lockout on admin login</h3>
+    <div class="loc">internal/handlers/admin.go:17-27</div>
+    <p><code>AdminLoginPost</code> accepts unlimited password attempts. bcrypt slows each guess and covers timing, but there is no per-IP throttle, no lockout, no delay. Combined with a single shared admin password, this is an open online brute-force target. Because bcrypt is CPU-heavy and SQLite is single-connection, a flood of login attempts also doubles as a CPU-exhaustion DoS.</p>
+    <p class="fix">Fix: add rate limiting (e.g. <code>httprate</code>) on <code>/admin/login</code> and a backoff/lockout after N failures.</p>
+  </div>
+
+  <div class="finding f-high">
+    <h3><span class="badge b-high">High</span>Zero test coverage on the handlers and db packages</h3>
+    <div class="loc">internal/handlers/*.go, internal/db/db.go (no _test.go files)</div>
+    <p><code>go test ./...</code> reports <code>[no test files]</code> for <code>internal/handlers</code> and <code>internal/db</code>. The handlers package holds every piece of business logic that a bug would actually hurt: the publish/unpublish action logic, delete, template rendering, static generation, markdown rendering, DSN parsing, and migration wiring. The server_test.go covers routing at the edges, but the branch logic inside <code>AdminUpdatePost</code> (delete vs publish vs draft), <code>generate.go</code>, and DSN error paths in <code>db.Open</code> are entirely untested. This is exactly where the finding below (#unpublish) hides.</p>
+    <p class="fix">Fix: add handler-level tests for update/delete/publish transitions and a db test for the unsupported-DSN error path.</p>
+  </div>
+
+  <div class="finding f-high">
+    <h3><span class="badge b-high">High</span>Editing a post silently unpublishes it unless you click "publish"</h3>
+    <div class="loc">internal/handlers/admin.go:90-92, 103</div>
+    <p><code>AdminUpdatePost</code> sets <code>updated.Published = r.FormValue("action") == "publish"</code>. Published state is derived <em>only</em> from which button was pressed, not from the post's existing state. If the editor form has a "Save" button (action != "publish"), or the admin edits a live post and saves without hitting the exact publish action, the post is <strong>unpublished and vanishes from the public site</strong>. It ignores <code>existing.Published</code> entirely. This is a data-visibility bug waiting to bite in production, and it is untested (see coverage finding).</p>
+    <pre><code>updated.Published = r.FormValue("action") == "publish"   // ignores existing state
+// action=="save" or anything else  =>  Published=false  =>  post disappears</code></pre>
+    <p class="fix">Fix: treat publish/unpublish as explicit distinct actions and default to preserving <code>existing.Published</code> on a plain save.</p>
+  </div>
+
+  <!-- ============ MEDIUM ============ -->
+  <h2>Medium</h2>
+
+  <div class="finding f-med">
+    <h3><span class="badge b-med">Medium</span>N+1 queries when resolving tags on every create/update</h3>
+    <div class="loc">internal/models/post.go:188-202 (resolveTags)</div>
+    <p><code>resolveTags</code> runs a separate <code>FirstOrCreate</code> per tag name (one round trip each). For a post with M tags, that's M queries before the insert. On SQLite (max 1 conn) each is serialized. Not fatal at a personal-blog scale, but it is a genuine N+1 and it runs inside <code>Update</code>'s transaction, lengthening the write lock.</p>
+    <p class="fix">Fix: batch into one <code>SELECT ... WHERE name IN (...)</code> then bulk-insert the missing names.</p>
+  </div>
+
+  <div class="finding f-med">
+    <h3><span class="badge b-med">Medium</span>Postgres join has no index on <code>post_tags.tag_id</code></h3>
+    <div class="loc">internal/db/migrations/postgres/001_initial.sql:17-21, sqlite/001_initial.sql:17-21</div>
+    <p><code>post_tags</code> PK is <code>(post_id, tag_id)</code>, which indexes <code>post_id</code> first. <code>ListByTag</code> joins <code>tags.id = post_tags.tag_id</code> (the reverse direction) with no standalone index on <code>tag_id</code>. On Postgres this forces a scan on the tag→post lookup as the table grows. SQLite has the same gap. Also there is no index supporting <code>ORDER BY created_at DESC</code> on <code>posts</code>, so <code>List</code> sorts via a scan.</p>
+    <p class="fix">Fix: add <code>CREATE INDEX ON post_tags(tag_id)</code> and <code>CREATE INDEX ON posts(created_at)</code>.</p>
+  </div>
+
+  <div class="finding f-med">
+    <h3><span class="badge b-med">Medium</span><code>renderMarkdown</code> returns <code>template.HTML</code>, disabling autoescape; safety depends entirely on goldmark config</h3>
+    <div class="loc">internal/handlers/blog.go:13-23</div>
+    <p>The rendered markdown is wrapped in <code>template.HTML</code>, which tells <code>html/template</code> "trust this, do not escape." The only thing preventing stored XSS is that the goldmark instance omits <code>WithUnsafe()</code>, so raw HTML in post bodies is escaped. That's correct <em>today</em>, but it's fragile: a future dev adding <code>WithUnsafe</code> or an HTML-passthrough extension instantly turns the admin-authored body into stored XSS with zero other guardrails (no CSP; see High finding). The safety of the whole app hinges on one missing option with no defense in depth.</p>
+    <p class="fix">Fix: keep goldmark safe, add a sanitizer (bluemonday) as a second layer, and add a CSP.</p>
+  </div>
+
+  <div class="finding f-med">
+    <h3><span class="badge b-med">Medium</span>Server binds all interfaces with no bind-address config</h3>
+    <div class="loc">internal/server/server.go:55</div>
+    <p><code>Addr: fmt.Sprintf(":%d", cfg.Port)</code> binds <code>0.0.0.0</code> unconditionally. There is no way to restrict the admin surface to localhost / a private interface behind a reverse proxy. Combined with no <code>Secure</code> cookie and no rate limiting, a dev who runs this directly on a box exposes the admin panel to the internet by default.</p>
+    <p class="fix">Fix: add a configurable <code>bind_addr</code> (default <code>127.0.0.1</code> or document the reverse-proxy expectation).</p>
+  </div>
+
+  <div class="finding f-med">
+    <h3><span class="badge b-med">Medium</span><code>Update</code> partial failure leaves post updated but tags stale, plus <code>Updates(map)</code> won't clear falsey fields correctly if reused</h3>
+    <div class="loc">internal/models/post.go:134-151</div>
+    <p>The transaction is correct in that both statements share <code>tx</code>. But note the update uses a <code>map[string]any</code> specifically to force <code>published:false</code> to persist (GORM struct updates skip zero values). That's a subtle GORM footgun the author navigated (good), but it means any future field added to the struct-update path will silently drop <code>false</code>/<code>0</code>/<code>""</code> values. Also, <code>tx.Model(&r).Updates(...)</code> on a non-existent ID updates zero rows with no error, so updating a deleted post "succeeds" silently before the tag replace.</p>
+    <p class="fix">Fix: check <code>RowsAffected</code> after the update and return a not-found error if zero.</p>
+  </div>
+
+  <div class="finding f-med">
+    <h3><span class="badge b-med">Medium</span>Migrations create tables but GORM models could drift (no AutoMigrate, no schema assertion)</h3>
+    <div class="loc">internal/db/db.go:87-94, internal/models/post.go:24-43</div>
+    <p>Schema is owned by goose SQL; GORM models carry their own tags (<code>uniqueIndex</code>, <code>not null</code>, <code>default:false</code>, m2m join names) that are never applied or verified because there is no <code>AutoMigrate</code>. The <code>joinForeignKey:post_id</code>/<code>joinReferences:tag_id</code> mapping must match the hand-written <code>post_tags</code> exactly. If someone edits one and not the other, GORM will generate queries against columns that don't exist and fail only at runtime. Nothing tests the postgres migration path at all.</p>
+    <p class="fix">Fix: add a startup schema check, or a CI test that runs both migration sets and exercises the m2m round-trip on Postgres.</p>
+  </div>
+
+  <div class="finding f-med">
+    <h3><span class="badge b-med">Medium</span><code>ListByTag</code> double-loads tags: JOIN filters, Preload re-queries</h3>
+    <div class="loc">internal/models/post.go:69-85</div>
+    <p>The query JOINs <code>post_tags</code>/<code>tags</code> to filter by tag name, then <code>Preload("Tags")</code> issues a second query per result set to hydrate all tags. Functionally fine, but the JOIN can also produce duplicate <code>posts</code> rows if a post matched multiple times (not here since it filters one tag, but it's a fragile pattern: adding a second tag filter would silently duplicate rows without a <code>DISTINCT</code>/<code>Group</code>).</p>
+    <p class="fix">Fix: prefer a subquery (<code>posts.id IN (SELECT post_id FROM post_tags ...)</code>) to keep filtering and hydration cleanly separated.</p>
+  </div>
+
+  <!-- ============ LOW ============ -->
+  <h2>Low</h2>
+
+  <div class="finding f-low">
+    <h3><span class="badge b-low">Low</span><code>ClearSession</code> cookie attributes don't match <code>SetSession</code></h3>
+    <div class="loc">internal/auth/auth.go:55-63</div>
+    <p>The clearing cookie omits <code>HttpOnly</code>, <code>SameSite</code>, and (once added) <code>Secure</code>. Some proxies/browsers treat a Set-Cookie whose attributes differ from the original as a distinct cookie and won't overwrite it. Mirror the attributes to guarantee deletion.</p>
+  </div>
+
+  <div class="finding f-low">
+    <h3><span class="badge b-low">Low</span>Error strings from the DB leaked to the admin UI</h3>
+    <div class="loc">internal/handlers/admin.go:67, 106</div>
+    <p>On create/update failure the raw <code>err.Error()</code> (e.g. GORM/SQLite constraint text) is rendered into the editor template. It's admin-only, so impact is low, but it leaks schema/driver internals and, if the template ever renders it unescaped, could reflect input.</p>
+  </div>
+
+  <div class="finding f-low">
+    <h3><span class="badge b-low">Low</span>Sample config duplicated in two places, will drift</h3>
+    <div class="loc">main.go:168-184 (const sampleConfig) vs docs/ntx.sample.toml</div>
+    <p>The embedded <code>sampleConfig</code> and the docs sample are maintained separately. <code>gen-config</code>'s <code>ReplaceAll</code> also depends on the <em>exact</em> string <code>session_secret      = ""</code> (fixed spacing); reformat the template and the secret silently stops being injected, shipping a config with an empty secret that then fails validation confusingly.</p>
+  </div>
+
+  <div class="finding f-low">
+    <h3><span class="badge b-low">Low</span>Absurd <code>itoa</code> helper in tests</h3>
+    <div class="loc">internal/server/server_test.go:482-485</div>
+    <p><code>strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("%d", n)...)))</code> is <code>strconv.FormatInt(n,10)</code> written by someone fighting a phantom. It's dead-weight and signals copy-paste under duress.</p>
+  </div>
+
+  <div class="finding f-low">
+    <h3><span class="badge b-low">Low</span>Dev mode reparses templates from disk on every request</h3>
+    <div class="loc">internal/handlers/handler.go:34-52, 82-86</div>
+    <p>In <code>dev</code>, <code>Has</code> does an <code>os.Stat</code> and <code>Get</code> re-<code>ParseFiles</code> per request. Fine for dev, but there is no guard preventing <code>Dev:true</code> in production config, where this becomes a per-request filesystem hit and a way to pick up half-written template files. No config validation forbids dev+prod-like settings.</p>
+  </div>
+
+  <div class="finding f-low">
+    <h3><span class="badge b-low">Low</span><code>Stats()</code> uses three separate COUNT queries</h3>
+    <div class="loc">internal/models/post.go:169-185</div>
+    <p>Three round trips (total, published, tags) rendered on every admin dashboard load. Trivial now, but on SQLite's single connection it's three serialized queries where one <code>SELECT count(*), count(*) FILTER(...)</code> would do. Also <code>int(t)</code> casts from int64 to int (harmless on 64-bit, a latent overflow on 32-bit).</p>
+  </div>
+
+  <!-- ============ INFO ============ -->
+  <h2>Info</h2>
+
+  <div class="finding f-info">
+    <h3><span class="badge b-info">Info</span>Single shared admin password: no user model, no MFA</h3>
+    <div class="loc">internal/config/config.go:29, internal/auth/auth.go</div>
+    <p>Auth is one bcrypt hash in the config file. Acceptable for a personal site, but there's no per-user auditability, no MFA, and rotating the password requires editing config and restarting. Worth stating as an accepted design limit.</p>
+  </div>
+
+  <div class="finding f-info">
+    <h3><span class="badge b-info">Info</span>No graceful shutdown</h3>
+    <div class="loc">main.go:63-64</div>
+    <p><code>srv.ListenAndServe()</code> is called with no signal handling / <code>srv.Shutdown</code>. On SIGTERM, in-flight requests and the WAL checkpoint are cut off. Low risk for SQLite WAL but worth adding.</p>
+  </div>
+
+  <div class="finding f-info">
+    <h3><span class="badge b-info">Info</span>No request context / cancellation reaches the DB layer</h3>
+    <div class="loc">internal/models/post.go (all methods)</div>
+    <p>Store methods take no <code>context.Context</code>; they use the base <code>*gorm.DB</code>. A client disconnect can't cancel a slow query. Fine at this scale, but the store API forecloses adding timeouts later without a signature change.</p>
+  </div>
+
+  <div class="finding f-info">
+    <h3><span class="badge b-info">Info</span>Static file server relies solely on stdlib traversal protection</h3>
+    <div class="loc">internal/server/server.go:39</div>
+    <p><code>http.FileServer(http.Dir(cfg.StaticPath))</code> behind <code>StripPrefix</code> is safe against <code>../</code> traversal (stdlib cleans paths), and directory listings are a stdlib default. No bug, noted because it's the one place traversal could appear and it's handled correctly.</p>
+  </div>
+
+  <div class="finding f-info">
+    <h3><span class="badge b-info">Info</span><code>generate.go</code> copies static tree with fixed perms, follows no symlinks check</h3>
+    <div class="loc">internal/handlers/generate.go:124-157</div>
+    <p><code>copyDir</code> walks <code>StaticPath</code> and rewrites everything <code>0644</code>/dirs <code>0755</code>, discarding original perms (fine for a web root). It doesn't special-case symlinks: <code>filepath.Walk</code> doesn't follow them, so a symlink in static/ is copied as a regular file of the link target's <em>path bytes</em> only if opened... actually it <code>os.Open</code>s and copies target content. Low concern for a trusted static dir; noted for completeness.</p>
+  </div>
+
+  <div class="finding f-info">
+    <h3><span class="badge b-info">Info</span>SQLite pinned to a single connection</h3>
+    <div class="loc">internal/db/db.go:43</div>
+    <p><code>SetMaxOpenConns(1)</code> is the correct, safe choice for SQLite writes and avoids <code>SQLITE_BUSY</code>. Flagged only because it turns every other latency issue in this report (no timeouts, N+1, 3x COUNT, bcrypt on login) into a global serialization point. The mitigations above matter more <em>because</em> of this.</p>
+  </div>
+
+  <!-- ============ STRENGTHS ============ -->
+  <h2>Strengths</h2>
+  <div class="finding f-good">
+    <h3><span class="badge b-good">Good</span>Things done right</h3>
+    <ul>
+      <li><strong>HMAC session verification uses <code>hmac.Equal</code></strong> (constant-time), no timing oracle on the signature. Session expiry is checked. (auth.go:95, 107)</li>
+      <li><strong>Passwords are bcrypt</strong> at <code>DefaultCost</code>; comparison via <code>CompareHashAndPassword</code> is constant-time. (auth.go:31-38)</li>
+      <li><strong>Config validation is strict and fail-closed</strong>: refuses to start without a &ge;32-char session secret and a password hash. (config.go:74-82)</li>
+      <li><strong>All SQL goes through GORM parameterized queries / placeholders</strong>, no string-built SQL anywhere; the Sprintf-SQL grep found nothing.</li>
+      <li><strong>goldmark configured safe by default</strong> (no <code>WithUnsafe</code>), and there's an explicit XSS regression test asserting <code>&lt;script&gt;</code> is stripped. (server_test.go:448)</li>
+      <li><strong><code>render</code> buffers to a <code>bytes.Buffer</code> before writing</strong>, so a mid-template error yields a clean 500 instead of a half-written 200. (handler.go:132-139)</li>
+      <li><strong>Consistent error handling</strong>: <code>gorm.ErrRecordNotFound</code> mapped to <code>nil,nil</code> and turned into 404s; DB errors surfaced as 500 with logging, not swallowed.</li>
+      <li><strong>DB cleanup is correct</strong>: <code>defer sqlDB.Close()</code> in both commands, and failure paths in <code>openSQLite</code>/<code>openPostgres</code> close the handle before returning.</li>
+      <li><strong>FK enforcement + WAL enabled</strong> for SQLite; <code>ON DELETE CASCADE</code> on <code>post_tags</code> keeps join rows consistent when a post is deleted. (db.go:44-49, migrations)</li>
+      <li><strong><code>chi</code> middleware includes <code>Recoverer</code></strong> so a handler panic becomes a 500 instead of crashing the process. (server.go:23)</li>
+      <li><strong>Clean layering</strong>: public <code>Post</code> type vs internal <code>dbPost</code>, store interface isolates GORM, handlers don't touch the DB directly. Genuinely tidy.</li>
+      <li><strong><code>go vet</code> clean, tests pass, and auth/config/models are well-covered</strong> including tamper, expiry, wrong-secret, and dedup cases.</li>
+    </ul>
+  </div>
+
+  <p class="sub" style="margin-top:30px">Bottom line: the crypto and SQL layers are solid: no injection, no timing holes, sensible fail-closed config. The exposure is operational: an unrevocable session token over a cookie that isn't <code>Secure</code>, on a server with no timeouts, no security headers, no rate limiting, and one silent data-visibility bug (edit→unpublish) sitting in the untested handlers package. Fix the two Criticals and the timeout/headers/rate-limit trio before this faces the internet.</p>
+</div>
+</body>
+</html>

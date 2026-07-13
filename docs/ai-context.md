@@ -190,6 +190,16 @@ type Post struct {
 
 `PostStore` wraps a `*sql.DB`. Key methods: `List()`, `GetBySlug()`, `Create()`, `Update()`.
 
+## CLI commands (`main.go`)
+
+| Command | Notes |
+|---|---|
+| `serve` | loads config, opens DB, starts HTTP server |
+| `generate` | renders all public pages to disk |
+| `hash-password` | prompts for password (no echo), prints bcrypt hash |
+| `gen-config` | prints a sample `ntx.toml` with a freshly generated `session_secret`; `-p` flag prompts for password and embeds the bcrypt hash |
+| `version` | prints the build version |
+
 ## Auth (`internal/auth/auth.go`)
 
 Session-based. `SessionManager` stores session tokens in SQLite with expiry. The `Middleware` method is a chi middleware that 401s or redirects unauthenticated requests. Password check uses `bcrypt.CompareHashAndPassword`.
