@@ -33,7 +33,11 @@ func (l *loginLimiter) allow(ip string) bool {
 			recent = append(recent, t)
 		}
 	}
-	l.attempts[ip] = recent
+	if len(recent) == 0 {
+		delete(l.attempts, ip)
+	} else {
+		l.attempts[ip] = recent
+	}
 	if len(recent) >= 5 {
 		return false
 	}
