@@ -3,7 +3,7 @@ package models
 import (
 	"testing"
 
-	"github.com/nerdtx/ntx/internal/db"
+	"github.com/nod/ntx/internal/db"
 )
 
 func newTestDB(t *testing.T) *PostStore {

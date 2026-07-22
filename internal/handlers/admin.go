@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/nerdtx/ntx/internal/auth"
-	"github.com/nerdtx/ntx/internal/models"
+	"github.com/nod/ntx/internal/auth"
+	"github.com/nod/ntx/internal/models"
 )
 
 type loginLimiter struct {

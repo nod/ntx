@@ -16,24 +16,24 @@ Can also be used to generate a static site for deployment anywhere.
 **Homebrew (macOS/Linux):**
 
 ```sh
-brew tap nerdtx/ntx https://github.com/nerdtx/ntx
+brew tap nod/ntx https://github.com/nod/ntx
 brew install ntx
 ```
 
 **Shell script:**
 
 ```sh
-curl -sSf https://raw.githubusercontent.com/nerdtx/ntx/main/install.sh | sh
+curl -sSf https://raw.githubusercontent.com/nod/ntx/main/install.sh | sh
 ```
 
 Installs to `~/.local/bin` by default. Requires a pre-built release binary or Go 1.21+ as a fallback.
 
 ```sh
 # pin a version
-NTX_VERSION=v0.7.1 curl -sSf https://raw.githubusercontent.com/nerdtx/ntx/main/install.sh | sh
+NTX_VERSION=v0.7.1 curl -sSf https://raw.githubusercontent.com/nod/ntx/main/install.sh | sh
 
 # install to a different location
-INSTALL_DIR=/usr/local/bin curl -sSf https://raw.githubusercontent.com/nerdtx/ntx/main/install.sh | sh
+INSTALL_DIR=/usr/local/bin curl -sSf https://raw.githubusercontent.com/nod/ntx/main/install.sh | sh
 ```
 
 ## Quick start

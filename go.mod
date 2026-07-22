@@ -1,4 +1,4 @@
-module github.com/nerdtx/ntx
+module github.com/nod/ntx
 
 go 1.26.4
 

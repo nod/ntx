@@ -9,7 +9,7 @@ A self-hosted personal site server written in Go. It is not a framework or a CMS
 ## Module and Go version
 
 ```
-module github.com/nerdtx/ntx
+module github.com/nod/ntx
 go 1.26.4
 ```
 

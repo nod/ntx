@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/nerdtx/ntx/internal/config"
+	"github.com/nod/ntx/internal/config"
 )
 
 func (h *Handler) SectionPage(w http.ResponseWriter, r *http.Request, sec config.Section) {

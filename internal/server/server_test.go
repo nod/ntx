@@ -11,10 +11,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nerdtx/ntx/internal/auth"
-	"github.com/nerdtx/ntx/internal/config"
-	"github.com/nerdtx/ntx/internal/db"
-	"github.com/nerdtx/ntx/internal/models"
+	"github.com/nod/ntx/internal/auth"
+	"github.com/nod/ntx/internal/config"
+	"github.com/nod/ntx/internal/db"
+	"github.com/nod/ntx/internal/models"
 )
 
 func setupServer(t *testing.T) (*httptest.Server, *models.PostStore) {

@@ -62,7 +62,7 @@ Install [`slsa-verifier`](https://github.com/slsa-framework/slsa-verifier) and r
 ```sh
 slsa-verifier verify-artifact ntx-linux-amd64 \
   --provenance-path ntx.intoto.jsonl \
-  --source-uri github.com/nerdtx/ntx \
+  --source-uri github.com/nod/ntx \
   --source-tag v1.2.3
 ```
 

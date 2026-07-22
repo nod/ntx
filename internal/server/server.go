@@ -7,10 +7,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/nerdtx/ntx/internal/auth"
-	"github.com/nerdtx/ntx/internal/config"
-	"github.com/nerdtx/ntx/internal/handlers"
-	"github.com/nerdtx/ntx/internal/models"
+	"github.com/nod/ntx/internal/auth"
+	"github.com/nod/ntx/internal/config"
+	"github.com/nod/ntx/internal/handlers"
+	"github.com/nod/ntx/internal/models"
 )
 
 func New(cfg *config.Config, posts *models.PostStore, session *auth.SessionManager) (*http.Server, error) {

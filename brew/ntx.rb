@@ -1,27 +1,27 @@
 class Ntx < Formula
   desc "Self-hosted personal site server: blog, content sections, admin UI"
-  homepage "https://github.com/nerdtx/ntx"
+  homepage "https://github.com/nod/ntx"
   version "0.7.1"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/nerdtx/ntx/releases/download/v#{version}/ntx-darwin-arm64"
+      url "https://github.com/nod/ntx/releases/download/v#{version}/ntx-darwin-arm64"
       sha256 "" # fill in after release
     end
     on_intel do
-      url "https://github.com/nerdtx/ntx/releases/download/v#{version}/ntx-darwin-amd64"
+      url "https://github.com/nod/ntx/releases/download/v#{version}/ntx-darwin-amd64"
       sha256 "" # fill in after release
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/nerdtx/ntx/releases/download/v#{version}/ntx-linux-arm64"
+      url "https://github.com/nod/ntx/releases/download/v#{version}/ntx-linux-arm64"
       sha256 "" # fill in after release
     end
     on_intel do
-      url "https://github.com/nerdtx/ntx/releases/download/v#{version}/ntx-linux-amd64"
+      url "https://github.com/nod/ntx/releases/download/v#{version}/ntx-linux-amd64"
       sha256 "" # fill in after release
     end
   end

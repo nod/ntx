@@ -1,6 +1,6 @@
 #!/bin/sh
 # ntx installer
-# Usage: curl -sSf https://raw.githubusercontent.com/nerdtx/ntx/main/install.sh | sh
+# Usage: curl -sSf https://raw.githubusercontent.com/nod/ntx/main/install.sh | sh
 #
 # Environment variables:
 #   NTX_VERSION   — version to install (default: latest)
@@ -8,7 +8,7 @@
 
 set -e
 
-REPO="nerdtx/ntx"
+REPO="nod/ntx"
 VERSION="${NTX_VERSION:-}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 

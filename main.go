@@ -12,12 +12,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nerdtx/ntx/internal/auth"
-	"github.com/nerdtx/ntx/internal/config"
-	"github.com/nerdtx/ntx/internal/db"
-	"github.com/nerdtx/ntx/internal/handlers"
-	"github.com/nerdtx/ntx/internal/models"
-	"github.com/nerdtx/ntx/internal/server"
+	"github.com/nod/ntx/internal/auth"
+	"github.com/nod/ntx/internal/config"
+	"github.com/nod/ntx/internal/db"
+	"github.com/nod/ntx/internal/handlers"
+	"github.com/nod/ntx/internal/models"
+	"github.com/nod/ntx/internal/server"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
