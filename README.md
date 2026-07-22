@@ -1,13 +1,17 @@
 # ntx
 
+`nerd text server`
+
 A self-hosted personal site server. Blog, content sections, admin
 UI - configured via a single TOML file and HTML templates you
 supply. 
 
-Can also generate a static site for deployment anywhere.
+Dynamic option works with sqlite or postgresql to suit your needs.
+
+Can also be used to generate a static site for deployment anywhere.
 
 
-## Install
+## Install binary
 
 **Homebrew (macOS/Linux):**
 

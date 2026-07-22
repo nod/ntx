@@ -53,8 +53,13 @@ func New(cfg *config.Config, posts *models.PostStore, session *auth.SessionManag
 		r.Post("/admin/posts/{id}", h.AdminUpdatePost)
 	})
 
+	bindAddr := cfg.BindAddr
+	if bindAddr == "" {
+		bindAddr = "localhost"
+	}
+
 	return &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.Port),
+		Addr:         fmt.Sprintf("%s:%d", bindAddr, cfg.Port),
 		Handler:      r,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,

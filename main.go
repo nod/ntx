@@ -193,6 +193,7 @@ site_description    = ""
 static_path         = "./static"
 db_dsn              = "sqlite://./ntx.db"
 port                = 8080
+bind_addr           = ""   # empty = localhost only; use "0.0.0.0" to listen on all interfaces
 template_path       = "./templates"
 about_slug          = "about"
 admin_password_hash = ""   # required: bcrypt hash

@@ -24,6 +24,7 @@ type Config struct {
 	StaticPath        string    `mapstructure:"static_path"`
 	DBDSN             string    `mapstructure:"db_dsn"`
 	Port              int       `mapstructure:"port"`
+	BindAddr          string    `mapstructure:"bind_addr"`
 	TemplatePath      string    `mapstructure:"template_path"`
 	AboutSlug         string    `mapstructure:"about_slug"`
 	AdminPasswordHash string    `mapstructure:"admin_password_hash"`
