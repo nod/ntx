@@ -20,3 +20,6 @@ ntx.toml
 # OS
 .DS_Store
 Thumbs.db
+
+# impeccable tool cache/config
+.impeccable/
