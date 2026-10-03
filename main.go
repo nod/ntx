@@ -140,12 +140,11 @@ func rootCmd() *cobra.Command {
 				}
 				pw = string(b)
 			} else {
-				r := bufio.NewReader(os.Stdin)
-				line, err := r.ReadString('\n')
-				if err != nil && err != io.EOF {
+				var err error
+				pw, err = readPasswordLine(os.Stdin)
+				if err != nil {
 					return err
 				}
-				pw = strings.TrimRight(line, "\r\n")
 			}
 			hash, err := auth.HashPassword(pw)
 			if err != nil {
@@ -221,6 +220,25 @@ site_description    = ""
 about_slug          = "about"
 admin_password_hash = ""   # required: bcrypt hash
 `
+
+// readPasswordLine reads one newline-terminated password from r for
+// the non-terminal branch of hash-password (scripted/CI use, e.g.
+// `echo "$PW" | ntx hash-password`). It rejects an empty result: a
+// closed or empty stdin yields io.EOF with no bytes read, which would
+// otherwise silently hash the empty string and print a well-formed
+// bcrypt hash that authenticates an empty password -- with no warning
+// that nothing was actually read. See task-10 addendum, fix round 1.
+func readPasswordLine(r io.Reader) (string, error) {
+	line, err := bufio.NewReader(r).ReadString('\n')
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	pw := strings.TrimRight(line, "\r\n")
+	if pw == "" {
+		return "", fmt.Errorf("no password read from stdin")
+	}
+	return pw, nil
+}
 
 // applyGenConfigSubstitutions fills in the generated secret and, if a
 // hash was computed, the first site's admin_password_hash. The hash
