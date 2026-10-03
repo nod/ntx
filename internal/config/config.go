@@ -20,20 +20,32 @@ type Section struct {
 	Vars  map[string]interface{} `mapstructure:",remain"`
 }
 
-type Config struct {
-	StaticPath        string    `mapstructure:"static_path"`
-	DBDSN             string    `mapstructure:"db_dsn"`
-	Port              int       `mapstructure:"port"`
-	BindAddr          string    `mapstructure:"bind_addr"`
-	TemplatePath      string    `mapstructure:"template_path"`
+// Site is one tenant's configuration. ID is populated by
+// models.EnsureSites at boot, not read from TOML — it's the stable FK
+// used to scope posts/tags/sessions.
+type Site struct {
+	ID                int64     `mapstructure:"-"`
+	Key               string    `mapstructure:"key"`
+	SiteURL           string    `mapstructure:"site_url"`
+	SiteName          string    `mapstructure:"site_name"`
+	SiteDescription   string    `mapstructure:"site_description"`
 	AboutSlug         string    `mapstructure:"about_slug"`
 	AdminPasswordHash string    `mapstructure:"admin_password_hash"`
-	SessionSecret     string    `mapstructure:"session_secret"`
-	Dev               bool      `mapstructure:"dev"`
-	SiteName          string    `mapstructure:"site_name"`
-	SiteURL           string    `mapstructure:"site_url"`
-	SiteDescription   string    `mapstructure:"site_description"`
+	TemplatePath      string    `mapstructure:"template_path"`
+	StaticPath        string    `mapstructure:"static_path"`
 	Sections          []Section `mapstructure:"section"`
+}
+
+type Config struct {
+	BindAddr                string `mapstructure:"bind_addr"`
+	Port                    int    `mapstructure:"port"`
+	DBDSN                   string `mapstructure:"db_dsn"`
+	SessionSecret           string `mapstructure:"session_secret"`
+	Dev                     bool   `mapstructure:"dev"`
+	TemplatePath            string `mapstructure:"template_path"`
+	StaticPath              string `mapstructure:"static_path"`
+	GlobalAdminPasswordHash string `mapstructure:"global_admin_password_hash"`
+	Sites                   []Site `mapstructure:"site"`
 }
 
 func Load(cfgFile string) (*Config, error) {
@@ -43,11 +55,7 @@ func Load(cfgFile string) (*Config, error) {
 	v.SetDefault("db_dsn", "sqlite://./ntx.db")
 	v.SetDefault("port", 8080)
 	v.SetDefault("template_path", "./templates")
-	v.SetDefault("about_slug", "about")
 	v.SetDefault("dev", false)
-	v.SetDefault("site_name", "ntx")
-	v.SetDefault("site_url", "localhost")
-	v.SetDefault("site_description", "")
 
 	v.SetEnvPrefix("NTX")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
@@ -78,8 +86,45 @@ func Load(cfgFile string) (*Config, error) {
 	if len(cfg.SessionSecret) < 32 {
 		return nil, fmt.Errorf("session_secret must be at least 32 characters")
 	}
-	if cfg.AdminPasswordHash == "" {
-		return nil, fmt.Errorf("admin_password_hash must be set (run: ntx hash-password)")
+
+	if len(cfg.Sites) == 0 {
+		return nil, fmt.Errorf("at least one [[site]] block is required")
+	}
+
+	keys := make(map[string]bool, len(cfg.Sites))
+	urls := make(map[string]bool, len(cfg.Sites))
+	for i := range cfg.Sites {
+		s := &cfg.Sites[i]
+		if s.Key == "" {
+			return nil, fmt.Errorf("site %d: key must be set", i)
+		}
+		if s.SiteURL == "" {
+			return nil, fmt.Errorf("site %q: site_url must be set", s.Key)
+		}
+		if s.AdminPasswordHash == "" {
+			return nil, fmt.Errorf("site %q: admin_password_hash must be set (run: ntx hash-password)", s.Key)
+		}
+		if keys[s.Key] {
+			return nil, fmt.Errorf("duplicate site key %q", s.Key)
+		}
+		keys[s.Key] = true
+		if urls[s.SiteURL] {
+			return nil, fmt.Errorf("duplicate site_url %q", s.SiteURL)
+		}
+		urls[s.SiteURL] = true
+
+		if s.SiteName == "" {
+			s.SiteName = "ntx"
+		}
+		if s.AboutSlug == "" {
+			s.AboutSlug = "about"
+		}
+		if s.TemplatePath == "" {
+			s.TemplatePath = cfg.TemplatePath
+		}
+		if s.StaticPath == "" {
+			s.StaticPath = cfg.StaticPath
+		}
 	}
 
 	return &cfg, nil
