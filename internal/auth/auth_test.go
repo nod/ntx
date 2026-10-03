@@ -210,3 +210,30 @@ func TestSessionExpiry(t *testing.T) {
 		t.Error("expired session accepted")
 	}
 }
+
+func TestMiddlewareRejectsExpiredSession(t *testing.T) {
+	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
+
+	// Validly signed, but issued outside sessionMaxAge.
+	expired := time.Now().Add(-25 * time.Hour).Unix()
+	payload := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%d:%d", expired, 1)))
+	sig := sm.sign(payload)
+	value := payload + "." + sig
+
+	// currentSite matches the cookie's siteID (1), so this would pass if
+	// the session were merely scope-matched but not expired: a failure
+	// here can only be attributed to the expiry check.
+	currentSite := func(*http.Request) int64 { return 1 }
+	handler := sm.Middleware(currentSite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/posts", nil)
+	req.AddCookie(&http.Cookie{Name: cookieName, Value: value})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Errorf("expected redirect for expired session, got %d", rec.Code)
+	}
+}
