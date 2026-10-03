@@ -6,7 +6,7 @@ import (
 	"github.com/nod/ntx/internal/db"
 )
 
-func newTestDB(t *testing.T) *PostStore {
+func newTestStores(t *testing.T) (siteA, siteB *PostStore) {
 	t.Helper()
 	database, err := db.Open("sqlite://:memory:")
 	if err != nil {
@@ -16,7 +16,23 @@ func newTestDB(t *testing.T) *PostStore {
 		sqlDB, _ := database.DB()
 		sqlDB.Close()
 	})
-	return NewPostStore(database)
+	// The 001->002 migration backfills exactly one site ("default", id 1).
+	// posts.site_id/tags.site_id carry a NOT NULL FK to sites(id), enforced
+	// because db.Open turns on PRAGMA foreign_keys -- so site 2 needs a real
+	// row too, or every write through ForSite(2) below fails FK validation.
+	if err := database.Exec(
+		"INSERT INTO sites (key, hostname) VALUES (?, ?)", "site-b", "site-b.example.com",
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+	raw := NewPostStore(database)
+	return raw.ForSite(1), raw.ForSite(2)
+}
+
+func newTestDB(t *testing.T) *PostStore {
+	t.Helper()
+	s, _ := newTestStores(t)
+	return s
 }
 
 func TestCreateAndGetBySlug(t *testing.T) {
@@ -213,5 +229,65 @@ func TestTagDeduplication(t *testing.T) {
 	}
 	if len(all) != 1 {
 		t.Errorf("expected 1 unique tag, got %d: %v", len(all), all)
+	}
+}
+
+// Multi-tenant isolation tests
+
+func TestSlugUniquePerSiteNotGlobally(t *testing.T) {
+	siteA, siteB := newTestStores(t)
+
+	if err := siteA.Create(&Post{Slug: "same-slug", Title: "A's post", Body: "."}); err != nil {
+		t.Fatal(err)
+	}
+	if err := siteB.Create(&Post{Slug: "same-slug", Title: "B's post", Body: "."}); err != nil {
+		t.Fatalf("expected same slug to be valid in a different site, got: %v", err)
+	}
+
+	if err := siteA.Create(&Post{Slug: "same-slug", Title: "A's second post", Body: "."}); err == nil {
+		t.Error("expected duplicate slug within the same site to fail")
+	}
+}
+
+func TestForSiteIsolatesReads(t *testing.T) {
+	siteA, siteB := newTestStores(t)
+
+	if err := siteA.Create(&Post{Slug: "a-only", Title: "A Only", Body: ".", Published: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := siteB.GetBySlug("a-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Error("site B should not see site A's post")
+	}
+
+	all, err := siteB.List(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 0 {
+		t.Errorf("expected site B to have 0 posts, got %d", len(all))
+	}
+}
+
+func TestTagNameUniquePerSiteNotGlobally(t *testing.T) {
+	siteA, siteB := newTestStores(t)
+
+	if err := siteA.Create(&Post{Slug: "a1", Title: "A1", Body: ".", Tags: []string{"shared"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := siteB.Create(&Post{Slug: "b1", Title: "B1", Body: ".", Tags: []string{"shared"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	aTags, err := siteA.AllTags()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(aTags) != 1 {
+		t.Errorf("expected site A to see 1 tag, got %v", aTags)
 	}
 }
