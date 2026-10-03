@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/spf13/viper"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type SectionPage struct {
@@ -91,6 +92,12 @@ func Load(cfgFile string) (*Config, error) {
 		return nil, fmt.Errorf("at least one [[site]] block is required")
 	}
 
+	if cfg.GlobalAdminPasswordHash != "" {
+		if err := checkBcryptHash(cfg.GlobalAdminPasswordHash); err != nil {
+			return nil, fmt.Errorf("global_admin_password_hash: %w", err)
+		}
+	}
+
 	keys := make(map[string]bool, len(cfg.Sites))
 	urls := make(map[string]bool, len(cfg.Sites))
 	for i := range cfg.Sites {
@@ -103,6 +110,9 @@ func Load(cfgFile string) (*Config, error) {
 		}
 		if s.AdminPasswordHash == "" {
 			return nil, fmt.Errorf("site %q: admin_password_hash must be set (run: ntx hash-password)", s.Key)
+		}
+		if err := checkBcryptHash(s.AdminPasswordHash); err != nil {
+			return nil, fmt.Errorf("site %q: admin_password_hash: %w", s.Key, err)
 		}
 		if keys[s.Key] {
 			return nil, fmt.Errorf("duplicate site key %q", s.Key)
@@ -128,4 +138,16 @@ func Load(cfgFile string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// checkBcryptHash rejects anything that is not a well-formed bcrypt hash.
+// A truncated or mis-pasted hash is otherwise invisible until someone tries
+// to log in, at which point every attempt fails with "Invalid password" and
+// no amount of retyping the password helps. bcrypt.Cost does the parse for
+// us: it only succeeds on a hash bcrypt could actually compare against.
+func checkBcryptHash(hash string) error {
+	if _, err := bcrypt.Cost([]byte(hash)); err != nil {
+		return fmt.Errorf("not a valid bcrypt hash (run: ntx hash-password): %w", err)
+	}
+	return nil
 }
