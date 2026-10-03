@@ -291,3 +291,31 @@ func TestTagNameUniquePerSiteNotGlobally(t *testing.T) {
 		t.Errorf("expected site A to see 1 tag, got %v", aTags)
 	}
 }
+
+func TestUpdateCannotCrossSiteBoundary(t *testing.T) {
+	siteA, siteB := newTestStores(t)
+
+	p := &Post{Slug: "a-owned", Title: "A's Post", Body: ".", Tags: []string{"original"}}
+	if err := siteA.Create(p); err != nil {
+		t.Fatal(err)
+	}
+
+	hijack := &Post{ID: p.ID, Slug: "a-owned", Title: "Hijacked", Body: "hijacked body", Published: true, Tags: []string{"hijacked"}}
+	if err := siteB.Update(hijack); err == nil {
+		t.Error("expected site B updating site A's post id to fail")
+	}
+
+	got, err := siteA.GetBySlug("a-owned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("expected site A's post to still exist")
+	}
+	if got.Title != "A's Post" {
+		t.Errorf("title was modified by a cross-site update: got %q", got.Title)
+	}
+	if len(got.Tags) != 1 || got.Tags[0] != "original" {
+		t.Errorf("tags were modified by a cross-site update: got %v", got.Tags)
+	}
+}

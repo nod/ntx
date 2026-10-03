@@ -161,13 +161,17 @@ func (s *PostStore) Update(p *Post) error {
 	}
 	r := dbPost{ID: uint(p.ID)}
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&r).Where("site_id = ?", s.siteID).Updates(map[string]any{
+		res := tx.Model(&r).Where("site_id = ?", s.siteID).Updates(map[string]any{
 			"slug":      p.Slug,
 			"title":     p.Title,
 			"body":      p.Body,
 			"published": p.Published,
-		}).Error; err != nil {
-			return err
+		})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return fmt.Errorf("post %d not found in site %d", p.ID, s.siteID)
 		}
 		return tx.Model(&r).Association("Tags").Replace(tags)
 	})
