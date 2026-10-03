@@ -48,8 +48,12 @@ type dbTag struct {
 
 func (dbTag) TableName() string { return "tags" }
 
-// PostStore is scoped to one site once ForSite is called; a store with
-// siteID 0 (the zero value) matches no real site's rows.
+// PostStore is scoped to one site once ForSite is called. Persisted site
+// ids start at 1, so an unscoped store (siteID still 0) matches no real
+// site's rows -- but only because every query below spells its site_id
+// condition out as SQL. GORM drops zero-valued fields from a struct-based
+// Where, so Where(dbTag{SiteID: 0, Name: name}) would emit "name = ?"
+// alone and happily return another site's row; see resolveTags.
 type PostStore struct {
 	db     *gorm.DB
 	siteID int64
@@ -67,7 +71,7 @@ func (s *PostStore) ForSite(siteID int64) *PostStore {
 
 func (s *PostStore) List(publishedOnly bool) ([]Post, error) {
 	var records []dbPost
-	q := s.db.Preload("Tags").Where("site_id = ?", s.siteID).Order("created_at desc")
+	q := s.db.Preload("Tags", "site_id = ?", s.siteID).Where("site_id = ?", s.siteID).Order("created_at desc")
 	if publishedOnly {
 		q = q.Where("published = ?", true)
 	}
@@ -83,7 +87,7 @@ func (s *PostStore) List(publishedOnly bool) ([]Post, error) {
 
 func (s *PostStore) ListByTag(tag string) ([]Post, error) {
 	var records []dbPost
-	err := s.db.Preload("Tags").
+	err := s.db.Preload("Tags", "site_id = ?", s.siteID).
 		Where("posts.site_id = ?", s.siteID).
 		Joins("JOIN post_tags ON post_tags.post_id = posts.id").
 		Joins("JOIN tags ON tags.id = post_tags.tag_id AND tags.name = ? AND tags.site_id = ?", tag, s.siteID).
@@ -102,7 +106,7 @@ func (s *PostStore) ListByTag(tag string) ([]Post, error) {
 
 func (s *PostStore) GetBySlug(slug string) (*Post, error) {
 	var r dbPost
-	err := s.db.Preload("Tags").Where("site_id = ? AND slug = ?", s.siteID, slug).First(&r).Error
+	err := s.db.Preload("Tags", "site_id = ?", s.siteID).Where("site_id = ? AND slug = ?", s.siteID, slug).First(&r).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
@@ -115,7 +119,7 @@ func (s *PostStore) GetBySlug(slug string) (*Post, error) {
 
 func (s *PostStore) GetByID(id int64) (*Post, error) {
 	var r dbPost
-	err := s.db.Preload("Tags").Where("site_id = ?", s.siteID).First(&r, id).Error
+	err := s.db.Preload("Tags", "site_id = ?", s.siteID).Where("site_id = ?", s.siteID).First(&r, id).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
@@ -178,7 +182,16 @@ func (s *PostStore) Update(p *Post) error {
 }
 
 func (s *PostStore) Delete(id int64) error {
-	return s.db.Where("site_id = ?", s.siteID).Delete(&dbPost{}, id).Error
+	// Matches Update's contract: a cross-site id deletes nothing, and that
+	// has to be an error rather than a silent no-op.
+	res := s.db.Where("site_id = ?", s.siteID).Delete(&dbPost{}, id)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("post %d not found in site %d", id, s.siteID)
+	}
+	return nil
 }
 
 func (s *PostStore) AllTags() ([]string, error) {
@@ -213,6 +226,11 @@ func (s *PostStore) Stats() (total, published, drafts, tagCount int, err error) 
 
 // resolveTags finds or creates each tag by name (scoped to this site) and
 // returns the dbTag slice.
+//
+// The site_id condition is written as explicit SQL rather than as a
+// struct-based Where: GORM omits zero-valued struct fields from the
+// generated WHERE clause, so an unscoped store would look up tags by name
+// alone and attach another site's tag row to this site's post.
 func (s *PostStore) resolveTags(names []string) ([]dbTag, error) {
 	var tags []dbTag
 	for _, name := range names {
@@ -221,7 +239,10 @@ func (s *PostStore) resolveTags(names []string) ([]dbTag, error) {
 			continue
 		}
 		var t dbTag
-		if err := s.db.Where(dbTag{SiteID: s.siteID, Name: name}).FirstOrCreate(&t).Error; err != nil {
+		err := s.db.Where("site_id = ? AND name = ?", s.siteID, name).
+			Attrs(dbTag{SiteID: s.siteID, Name: name}).
+			FirstOrCreate(&t).Error
+		if err != nil {
 			return nil, err
 		}
 		tags = append(tags, t)
