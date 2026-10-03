@@ -23,37 +23,49 @@ func renderMarkdown(src string) (template.HTML, error) {
 }
 
 func (h *Handler) BlogIndex(w http.ResponseWriter, r *http.Request) {
+	sh := h.current(r)
+	if sh == nil {
+		h.notFound(w)
+		return
+	}
+
 	tag := r.URL.Query().Get("tag")
 
 	var posts interface{}
 	var err error
 
 	if tag != "" {
-		posts, err = h.posts.ListByTag(tag)
+		posts, err = sh.posts.ListByTag(tag)
 	} else {
-		posts, err = h.posts.List(true)
+		posts, err = sh.posts.List(true)
 	}
 	if err != nil {
 		h.serverError(w, err)
 		return
 	}
 
-	allTags, err := h.posts.AllTags()
+	allTags, err := sh.posts.AllTags()
 	if err != nil {
 		h.serverError(w, err)
 		return
 	}
 
 	h.render(w, r, "blog/index.html", map[string]interface{}{
-		"Posts":      posts,
-		"AllTags":    allTags,
-		"ActiveTag":  tag,
+		"Posts":     posts,
+		"AllTags":   allTags,
+		"ActiveTag": tag,
 	})
 }
 
 func (h *Handler) BlogPost(w http.ResponseWriter, r *http.Request) {
+	sh := h.current(r)
+	if sh == nil {
+		h.notFound(w)
+		return
+	}
+
 	slug := chi.URLParam(r, "slug")
-	post, err := h.posts.GetBySlug(slug)
+	post, err := sh.posts.GetBySlug(slug)
 	if err != nil {
 		h.serverError(w, err)
 		return

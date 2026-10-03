@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"strconv"
@@ -22,26 +23,28 @@ func newLoginLimiter() *loginLimiter {
 	return &loginLimiter{attempts: make(map[string][]time.Time)}
 }
 
-// allow returns true if the IP is under the threshold (5 attempts per 15 minutes).
-func (l *loginLimiter) allow(ip string) bool {
+// allow returns true if key is under the threshold (5 attempts per 15
+// minutes). key is "<siteID>:<ip>" so one site's brute-force lockout
+// doesn't collaterally lock out login attempts on another site.
+func (l *loginLimiter) allow(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	cutoff := time.Now().Add(-15 * time.Minute)
 	var recent []time.Time
-	for _, t := range l.attempts[ip] {
+	for _, t := range l.attempts[key] {
 		if t.After(cutoff) {
 			recent = append(recent, t)
 		}
 	}
 	if len(recent) == 0 {
-		delete(l.attempts, ip)
+		delete(l.attempts, key)
 	} else {
-		l.attempts[ip] = recent
+		l.attempts[key] = recent
 	}
 	if len(recent) >= 5 {
 		return false
 	}
-	l.attempts[ip] = append(l.attempts[ip], time.Now())
+	l.attempts[key] = append(l.attempts[key], time.Now())
 	return true
 }
 
@@ -50,21 +53,33 @@ func (h *Handler) AdminLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) AdminLoginPost(w http.ResponseWriter, r *http.Request) {
+	sh := h.current(r)
+	if sh == nil {
+		h.notFound(w)
+		return
+	}
+
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if !h.limiter.allow(ip) {
+	limitKey := fmt.Sprintf("%d:%s", sh.site.ID, ip)
+	if !h.limiter.allow(limitKey) {
 		h.render(w, r, "admin/login.html", map[string]interface{}{
 			"Error": "Too many attempts. Try again later.",
 		})
 		return
 	}
+
 	password := r.FormValue("password")
-	if err := auth.CheckPassword(h.cfg.AdminPasswordHash, password); err != nil {
+	switch {
+	case auth.CheckPassword(sh.site.AdminPasswordHash, password) == nil:
+		h.session.SetSession(w, sh.site.ID)
+	case h.globalAdminHash != "" && auth.CheckPassword(h.globalAdminHash, password) == nil:
+		h.session.SetSession(w, auth.GlobalSiteID)
+	default:
 		h.render(w, r, "admin/login.html", map[string]interface{}{
 			"Error": "Invalid password.",
 		})
 		return
 	}
-	h.session.SetSession(w)
 	http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
 }
 
@@ -74,22 +89,27 @@ func (h *Handler) AdminLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) AdminPosts(w http.ResponseWriter, r *http.Request) {
-	posts, err := h.posts.List(false)
+	sh := h.current(r)
+	if sh == nil {
+		h.notFound(w)
+		return
+	}
+	posts, err := sh.posts.List(false)
 	if err != nil {
 		h.serverError(w, err)
 		return
 	}
-	total, published, drafts, tagCount, err := h.posts.Stats()
+	total, published, drafts, tagCount, err := sh.posts.Stats()
 	if err != nil {
 		h.serverError(w, err)
 		return
 	}
 	h.render(w, r, "admin/posts.html", map[string]interface{}{
-		"Posts":    posts,
-		"Total":    total,
+		"Posts":     posts,
+		"Total":     total,
 		"Published": published,
-		"Drafts":   drafts,
-		"TagCount": tagCount,
+		"Drafts":    drafts,
+		"TagCount":  tagCount,
 	})
 }
 
@@ -100,10 +120,15 @@ func (h *Handler) AdminNewPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) AdminCreatePost(w http.ResponseWriter, r *http.Request) {
+	sh := h.current(r)
+	if sh == nil {
+		h.notFound(w)
+		return
+	}
 	post := postFromForm(r)
 	post.Published = r.FormValue("action") == "publish"
 
-	if err := h.posts.Create(post); err != nil {
+	if err := sh.posts.Create(post); err != nil {
 		h.render(w, r, "admin/editor.html", map[string]interface{}{
 			"Post":  post,
 			"Error": err.Error(),
@@ -124,6 +149,11 @@ func (h *Handler) AdminEditPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) AdminUpdatePost(w http.ResponseWriter, r *http.Request) {
+	sh := h.current(r)
+	if sh == nil {
+		h.notFound(w)
+		return
+	}
 	existing, err := h.getPostFromParam(w, r)
 	if err != nil || existing == nil {
 		return
@@ -132,7 +162,7 @@ func (h *Handler) AdminUpdatePost(w http.ResponseWriter, r *http.Request) {
 	action := r.FormValue("action")
 
 	if action == "delete" {
-		if err := h.posts.Delete(existing.ID); err != nil {
+		if err := sh.posts.Delete(existing.ID); err != nil {
 			h.serverError(w, err)
 			return
 		}
@@ -151,7 +181,7 @@ func (h *Handler) AdminUpdatePost(w http.ResponseWriter, r *http.Request) {
 		updated.Published = existing.Published
 	}
 
-	if err := h.posts.Update(updated); err != nil {
+	if err := sh.posts.Update(updated); err != nil {
 		h.render(w, r, "admin/editor.html", map[string]interface{}{
 			"Post":  updated,
 			"Error": err.Error(),
@@ -162,13 +192,18 @@ func (h *Handler) AdminUpdatePost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) getPostFromParam(w http.ResponseWriter, r *http.Request) (*models.Post, error) {
+	sh := h.current(r)
+	if sh == nil {
+		h.notFound(w)
+		return nil, fmt.Errorf("no site resolved")
+	}
 	idStr := chi.URLParam(r, "id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		h.notFound(w)
 		return nil, err
 	}
-	post, err := h.posts.GetByID(id)
+	post, err := sh.posts.GetByID(id)
 	if err != nil {
 		h.serverError(w, err)
 		return nil, err

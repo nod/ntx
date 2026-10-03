@@ -7,9 +7,30 @@ import (
 	"github.com/nod/ntx/internal/config"
 )
 
-func (h *Handler) SectionPage(w http.ResponseWriter, r *http.Request, sec config.Section) {
-	pageSlug := chi.URLParam(r, "page")
+// SectionPage serves a page within sectionSlug, resolved against the
+// request's already-resolved site (server registers one route per unique
+// section slug across all sites — which site's Section content applies
+// is decided here, per request, not at route-registration time).
+func (h *Handler) SectionPage(w http.ResponseWriter, r *http.Request, sectionSlug string) {
+	sh := h.current(r)
+	if sh == nil {
+		h.notFound(w)
+		return
+	}
 
+	var sec *config.Section
+	for i := range sh.site.Sections {
+		if sh.site.Sections[i].Slug == sectionSlug {
+			sec = &sh.site.Sections[i]
+			break
+		}
+	}
+	if sec == nil {
+		h.notFound(w)
+		return
+	}
+
+	pageSlug := chi.URLParam(r, "page")
 	var page *config.SectionPage
 	for i := range sec.Pages {
 		if sec.Pages[i].Slug == pageSlug {
@@ -23,7 +44,7 @@ func (h *Handler) SectionPage(w http.ResponseWriter, r *http.Request, sec config
 	}
 
 	tmplName := "sections/" + sec.Slug + "/" + pageSlug + "/index.html"
-	if !h.templates.Has(tmplName) {
+	if !sh.templates.Has(tmplName) {
 		h.notFound(w)
 		return
 	}
