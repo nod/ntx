@@ -212,9 +212,13 @@ session_secret = ""   # required: random string, min 32 chars
 dev            = false
 # global_admin_password_hash = ""  # optional: bcrypt hash that can log into any site's admin
 
+# Each [[site]] block is one website. Requests are routed to a site by
+# matching the HTTP Host header against its site_url, so site_url must be the
+# hostname you actually browse with -- "localhost" for local testing, your real
+# domain in production. A request whose Host matches no site gets a 404.
 [[site]]
 key                 = "mysite"
-site_url            = "mysite.example.com"
+site_url            = "localhost"   # routing key: must match the Host header you browse with
 site_name           = "mysite"
 site_description    = ""
 about_slug          = "about"
