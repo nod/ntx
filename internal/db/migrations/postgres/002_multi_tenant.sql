@@ -22,6 +22,14 @@ CREATE UNIQUE INDEX idx_tags_site_name ON tags(site_id, name);
 
 -- +goose Down
 
+-- ONE-WAY IN PRACTICE. Re-adding the global UNIQUE constraints below only
+-- succeeds while no two sites share a post slug and no two sites share a tag
+-- name -- which is exactly what the Up section above made legal. Once a second
+-- site has content, expect this to abort on posts_slug_key (or tags_name_key).
+-- Goose runs each migration in a transaction, so it fails cleanly and leaves
+-- the multi-tenant schema intact rather than corrupting it; the way back is to
+-- restore the pre-upgrade database snapshot.
+
 DROP INDEX IF EXISTS idx_tags_site_name;
 DROP INDEX IF EXISTS idx_posts_site_slug;
 

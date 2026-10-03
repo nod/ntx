@@ -59,6 +59,15 @@ CREATE UNIQUE INDEX idx_tags_site_name  ON tags(site_id, name);
 
 -- +goose Down
 
+-- ONE-WAY IN PRACTICE. This rollback collapses every site's content back into
+-- a single-tenant schema where slug and name are globally UNIQUE, so it only
+-- succeeds while no two sites share a post slug and no two sites share a tag
+-- name -- which is exactly what the Up section above made legal. Once a second
+-- site has content, expect this to abort with "UNIQUE constraint failed:
+-- posts.slug" (or tags.name). Goose runs each migration in a transaction, so
+-- it fails cleanly and leaves the multi-tenant schema intact rather than
+-- corrupting it; the way back is to restore the pre-upgrade database snapshot.
+
 DROP INDEX IF EXISTS idx_tags_site_name;
 DROP INDEX IF EXISTS idx_posts_site_slug;
 
