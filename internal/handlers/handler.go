@@ -121,6 +121,21 @@ type Handler struct {
 // New builds a Handler serving every site in sites, backed by posts
 // (an unscoped store — New calls posts.ForSite per site internally).
 func New(sites []config.Site, posts *models.PostStore, session *auth.SessionManager, dev bool, globalAdminHash string) (*Handler, error) {
+	// Ruling 10, enforced here because this is where the damage happens:
+	// h.sites is keyed by site.ID, so if EnsureSites never ran, every site
+	// has ID 0 and they all collapse into one map entry, last write wins.
+	// 0 is also auth.GlobalSiteID, so every site-scoped session would
+	// authenticate everywhere. Persisted ids start at 1, so ID == 0 always
+	// means "EnsureSites was not called", never a real tenant. server.New
+	// checks this too -- it gives a better error earlier -- but `generate`
+	// calls handlers.New directly, so the guard belongs on this side of the
+	// boundary rather than resting on call-site discipline.
+	for i := range sites {
+		if sites[i].ID == 0 {
+			return nil, fmt.Errorf("site %q has no database id: models.EnsureSites must run before handlers.New", sites[i].Key)
+		}
+	}
+
 	h := &Handler{
 		session:         session,
 		limiter:         newLoginLimiter(),

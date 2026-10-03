@@ -70,10 +70,25 @@ func New(cfg *config.Config, posts *models.PostStore, session *auth.SessionManag
 		})
 	}
 
-	r.Handle("/static/*", http.StripPrefix("/static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Static resolution happens at boot, not per request: one FileServer per
+	// site, looked up by the site resolveSite already put on the request.
+	staticServers := make(map[int64]http.Handler, len(cfg.Sites))
+	for i := range cfg.Sites {
+		staticServers[cfg.Sites[i].ID] = http.StripPrefix("/static/", http.FileServer(http.Dir(cfg.Sites[i].StaticPath)))
+	}
+	r.Handle("/static/*", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		site := sitectx.From(r)
-		http.FileServer(http.Dir(site.StaticPath)).ServeHTTP(w, r)
-	})))
+		if site == nil {
+			http.NotFound(w, r)
+			return
+		}
+		fs, ok := staticServers[site.ID]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		fs.ServeHTTP(w, r)
+	}))
 
 	r.Get("/admin/login", h.AdminLogin)
 	r.Post("/admin/login", h.AdminLoginPost)
