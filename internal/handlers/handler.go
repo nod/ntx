@@ -13,6 +13,7 @@ import (
 	"github.com/nod/ntx/internal/auth"
 	"github.com/nod/ntx/internal/config"
 	"github.com/nod/ntx/internal/models"
+	"github.com/nod/ntx/internal/sitectx"
 )
 
 type TemplateCache struct {
@@ -91,43 +92,78 @@ func templateFuncs() template.FuncMap {
 	}
 }
 
-type Handler struct {
-	cfg       *config.Config
+// siteHandler bundles the per-site resources a request needs once its
+// site has been resolved: this site's config, its scoped post store, and
+// its own template cache (which points at the shared global
+// template/static paths if the site didn't override them — see Task 3's
+// config defaulting).
+type siteHandler struct {
+	site      config.Site
 	posts     *models.PostStore
-	session   *auth.SessionManager
 	templates *TemplateCache
-	limiter   *loginLimiter
 }
 
-func New(cfg *config.Config, posts *models.PostStore, session *auth.SessionManager) (*Handler, error) {
-	tc, err := NewTemplateCache(cfg.TemplatePath, cfg.Dev)
-	if err != nil {
-		return nil, fmt.Errorf("loading templates: %w", err)
-	}
-	return &Handler{
-		cfg:       cfg,
-		posts:     posts,
-		session:   session,
-		templates: tc,
-		limiter:   newLoginLimiter(),
-	}, nil
-}
-
-func (h *Handler) siteData() map[string]interface{} {
+func (sh *siteHandler) siteData() map[string]interface{} {
 	return map[string]interface{}{
-		"SiteName":        h.cfg.SiteName,
-		"SiteURL":         h.cfg.SiteURL,
-		"SiteDescription": h.cfg.SiteDescription,
+		"SiteName":        sh.site.SiteName,
+		"SiteURL":         sh.site.SiteURL,
+		"SiteDescription": sh.site.SiteDescription,
 	}
+}
+
+type Handler struct {
+	session         *auth.SessionManager
+	limiter         *loginLimiter
+	sites           map[int64]*siteHandler
+	globalAdminHash string
+}
+
+// New builds a Handler serving every site in sites, backed by posts
+// (an unscoped store — New calls posts.ForSite per site internally).
+func New(sites []config.Site, posts *models.PostStore, session *auth.SessionManager, dev bool, globalAdminHash string) (*Handler, error) {
+	h := &Handler{
+		session:         session,
+		limiter:         newLoginLimiter(),
+		sites:           make(map[int64]*siteHandler, len(sites)),
+		globalAdminHash: globalAdminHash,
+	}
+	for _, site := range sites {
+		tc, err := NewTemplateCache(site.TemplatePath, dev)
+		if err != nil {
+			return nil, fmt.Errorf("loading templates for site %q: %w", site.Key, err)
+		}
+		h.sites[site.ID] = &siteHandler{
+			site:      site,
+			posts:     posts.ForSite(site.ID),
+			templates: tc,
+		}
+	}
+	return h, nil
+}
+
+// current resolves the siteHandler for the request's already-resolved
+// site (set by server's Host-routing middleware via sitectx). Returns
+// nil if no site was resolved, which callers treat as a 404.
+func (h *Handler) current(r *http.Request) *siteHandler {
+	site := sitectx.From(r)
+	if site == nil {
+		return nil
+	}
+	return h.sites[site.ID]
 }
 
 func (h *Handler) render(w http.ResponseWriter, r *http.Request, name string, data map[string]interface{}) {
-	t, err := h.templates.Get(name)
+	sh := h.current(r)
+	if sh == nil {
+		h.notFound(w)
+		return
+	}
+	t, err := sh.templates.Get(name)
 	if err != nil {
 		h.serverError(w, err)
 		return
 	}
-	merged := h.siteData()
+	merged := sh.siteData()
 	for k, v := range data {
 		merged[k] = v
 	}
