@@ -273,6 +273,16 @@ func TestForSiteIsolatesReads(t *testing.T) {
 	}
 }
 
+// TestTagNameUniquePerSiteNotGlobally asserts that two sites using the same
+// tag name each own their own tags row.
+//
+// The row count is the load-bearing assertion. Counting what each site's
+// AllTags() returns is not enough: if resolveTags dropped its site_id
+// condition, site B's post would attach site A's existing tag row, and both
+// sites would still report exactly 1 tag named "shared" -- a live
+// cross-tenant association that per-site AllTags() cannot see. Only the
+// "2 rows named shared" check distinguishes two private rows from one shared
+// row, so that is what catches the mutation.
 func TestTagNameUniquePerSiteNotGlobally(t *testing.T) {
 	siteA, siteB := newTestStores(t)
 
@@ -287,8 +297,37 @@ func TestTagNameUniquePerSiteNotGlobally(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(aTags) != 1 {
-		t.Errorf("expected site A to see 1 tag, got %v", aTags)
+	if len(aTags) != 1 || aTags[0] != "shared" {
+		t.Errorf("expected site A to see exactly the tag \"shared\", got %v", aTags)
+	}
+
+	bTags, err := siteB.AllTags()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bTags) != 1 || bTags[0] != "shared" {
+		t.Errorf("expected site B to see exactly the tag \"shared\", got %v", bTags)
+	}
+
+	var sharedRows int64
+	if err := siteA.db.Model(&dbTag{}).Where("name = ?", "shared").Count(&sharedRows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if sharedRows != 2 {
+		t.Errorf("expected 2 tags rows named \"shared\" (one per site), got %d -- "+
+			"1 means the two sites are sharing a single tag row across the tenant boundary", sharedRows)
+	}
+
+	var bTagSiteID int64
+	if err := siteA.db.Model(&dbTag{}).
+		Select("tags.site_id").
+		Joins("JOIN post_tags ON post_tags.tag_id = tags.id").
+		Joins("JOIN posts ON posts.id = post_tags.post_id AND posts.slug = ?", "b1").
+		Scan(&bTagSiteID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if bTagSiteID != 2 {
+		t.Errorf("site B's post is associated with a tag owned by site %d, want site 2", bTagSiteID)
 	}
 }
 

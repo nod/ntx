@@ -6,6 +6,12 @@ import (
 	"testing"
 )
 
+// validHash is a real bcrypt hash (of "testpass"). Load bcrypt-validates
+// every admin_password_hash, so a stand-in like "$2a$10$placeholder" no
+// longer gets through -- and generating a fresh hash per test would pay
+// bcrypt's deliberate cost over and over.
+const validHash = `$2a$10$XKhLm60v72htK/lAO26kDuWPXh.3DovbWhmC/tN.E1UIzH0D.moZ.`
+
 func writeTOML(t *testing.T, content string) string {
 	t.Helper()
 	f := filepath.Join(t.TempDir(), "ntx.toml")
@@ -21,7 +27,7 @@ session_secret = "supersecretkey1234567890abcdef12"
 [[site]]
 key                 = "mysite"
 site_url            = "mysite.example.com"
-admin_password_hash = "$2a$10$placeholder"
+admin_password_hash = "` + validHash + `"
 `
 
 func TestEmptySessionSecretErrors(t *testing.T) {
@@ -31,7 +37,7 @@ session_secret = ""
 [[site]]
 key                 = "mysite"
 site_url            = "mysite.example.com"
-admin_password_hash = "$2a$10$placeholder"
+admin_password_hash = "`+validHash+`"
 `)
 	_, err := Load(f)
 	if err == nil {
@@ -46,7 +52,7 @@ session_secret = "tooshort"
 [[site]]
 key                 = "mysite"
 site_url            = "mysite.example.com"
-admin_password_hash = "$2a$10$placeholder"
+admin_password_hash = "`+validHash+`"
 `)
 	_, err := Load(f)
 	if err == nil {
@@ -70,7 +76,7 @@ session_secret = "supersecretkey1234567890abcdef12"
 
 [[site]]
 site_url            = "mysite.example.com"
-admin_password_hash = "$2a$10$placeholder"
+admin_password_hash = "`+validHash+`"
 `)
 	_, err := Load(f)
 	if err == nil {
@@ -84,7 +90,7 @@ session_secret = "supersecretkey1234567890abcdef12"
 
 [[site]]
 key                 = "mysite"
-admin_password_hash = "$2a$10$placeholder"
+admin_password_hash = "`+validHash+`"
 `)
 	_, err := Load(f)
 	if err == nil {
@@ -113,12 +119,12 @@ session_secret = "supersecretkey1234567890abcdef12"
 [[site]]
 key                 = "dup"
 site_url            = "a.example.com"
-admin_password_hash = "$2a$10$placeholder"
+admin_password_hash = "`+validHash+`"
 
 [[site]]
 key                 = "dup"
 site_url            = "b.example.com"
-admin_password_hash = "$2a$10$placeholder"
+admin_password_hash = "`+validHash+`"
 `)
 	_, err := Load(f)
 	if err == nil {
@@ -133,12 +139,12 @@ session_secret = "supersecretkey1234567890abcdef12"
 [[site]]
 key                 = "a"
 site_url            = "dup.example.com"
-admin_password_hash = "$2a$10$placeholder"
+admin_password_hash = "`+validHash+`"
 
 [[site]]
 key                 = "b"
 site_url            = "dup.example.com"
-admin_password_hash = "$2a$10$placeholder"
+admin_password_hash = "`+validHash+`"
 `)
 	_, err := Load(f)
 	if err == nil {
@@ -190,7 +196,7 @@ template_path  = "./shared-templates"
 [[site]]
 key                 = "mysite"
 site_url            = "mysite.example.com"
-admin_password_hash = "$2a$10$placeholder"
+admin_password_hash = "`+validHash+`"
 template_path       = "./mysite-templates"
 `)
 	cfg, err := Load(f)
@@ -202,6 +208,81 @@ template_path       = "./mysite-templates"
 	}
 }
 
+func TestSiteStaticPathOverride(t *testing.T) {
+	f := writeTOML(t, `
+session_secret = "supersecretkey1234567890abcdef12"
+static_path    = "./shared-static"
+
+[[site]]
+key                 = "mysite"
+site_url            = "mysite.example.com"
+admin_password_hash = "`+validHash+`"
+static_path         = "./mysite-static"
+`)
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sites[0].StaticPath != "./mysite-static" {
+		t.Errorf("site override ignored: got %q", cfg.Sites[0].StaticPath)
+	}
+}
+
+// TestMalformedSiteHashErrors and the two tests after it cover the spec's
+// Validation requirement that password hashes be well-formed, not merely
+// present. A truncated or mis-pasted hash is accepted by a non-empty check
+// and then fails every login attempt with "Invalid password", with no
+// boot-time signal that the config is the problem.
+func TestMalformedSiteHashErrors(t *testing.T) {
+	f := writeTOML(t, `
+session_secret = "supersecretkey1234567890abcdef12"
+
+[[site]]
+key                 = "mysite"
+site_url            = "mysite.example.com"
+admin_password_hash = "$2a$10$truncated"
+`)
+	_, err := Load(f)
+	if err == nil {
+		t.Error("expected error for a malformed site admin_password_hash")
+	}
+}
+
+func TestMalformedGlobalHashErrors(t *testing.T) {
+	f := writeTOML(t, `
+session_secret             = "supersecretkey1234567890abcdef12"
+global_admin_password_hash = "$2a$10$truncated"
+
+[[site]]
+key                 = "mysite"
+site_url            = "mysite.example.com"
+admin_password_hash = "`+validHash+`"
+`)
+	_, err := Load(f)
+	if err == nil {
+		t.Error("expected error for a malformed global_admin_password_hash")
+	}
+}
+
+func TestValidGlobalHashAccepted(t *testing.T) {
+	f := writeTOML(t, `
+session_secret             = "supersecretkey1234567890abcdef12"
+global_admin_password_hash = "`+validHash+`"
+
+[[site]]
+key                 = "mysite"
+site_url            = "mysite.example.com"
+admin_password_hash = "`+validHash+`"
+`)
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatalf("a well-formed global_admin_password_hash should load: %v", err)
+	}
+	if cfg.GlobalAdminPasswordHash != validHash {
+		t.Errorf("global_admin_password_hash not loaded: got %q", cfg.GlobalAdminPasswordHash)
+	}
+}
+
 func TestMultipleSites(t *testing.T) {
 	f := writeTOML(t, `
 session_secret = "supersecretkey1234567890abcdef12"
@@ -209,7 +290,7 @@ session_secret = "supersecretkey1234567890abcdef12"
 [[site]]
 key                 = "a"
 site_url            = "a.example.com"
-admin_password_hash = "$2a$10$placeholder"
+admin_password_hash = "`+validHash+`"
 
   [[site.section]]
   slug  = "projects"
@@ -222,7 +303,7 @@ admin_password_hash = "$2a$10$placeholder"
 [[site]]
 key                 = "b"
 site_url            = "b.example.com"
-admin_password_hash = "$2a$10$placeholder"
+admin_password_hash = "`+validHash+`"
 `)
 	cfg, err := Load(f)
 	if err != nil {

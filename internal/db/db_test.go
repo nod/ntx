@@ -180,3 +180,93 @@ func TestSQLiteUpgradePreservesData(t *testing.T) {
 		t.Error("expected duplicate (site_id, slug) insert to fail")
 	}
 }
+
+// TestSQLiteSitesHostnameNotUnique proves migration 003 removed the UNIQUE
+// constraint on sites.hostname without losing rows or breaking the FKs that
+// posts/tags hold against sites(id). The constraint was write-only -- nothing
+// reads hostname -- but it turned ordinary config edits (renaming a key while
+// keeping its site_url, swapping two sites' site_urls) into opaque startup
+// failures from EnsureSites. 003 rebuilds the table, so the FK check matters as
+// much as the constraint being gone.
+func TestSQLiteSitesHostnameNotUnique(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "hostname.db")
+
+	sqlDB, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("opening sqlite: %v", err)
+	}
+	t.Cleanup(func() { sqlDB.Close() })
+
+	if _, err := sqlDB.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
+		t.Fatalf("enabling foreign_keys: %v", err)
+	}
+
+	sub, err := fs.Sub(sqliteMigrations, "migrations/sqlite")
+	if err != nil {
+		t.Fatalf("fs.Sub: %v", err)
+	}
+	provider, err := goose.NewProvider(goose.DialectSQLite3, sqlDB, sub)
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	if _, err := provider.Up(ctx); err != nil {
+		t.Fatalf("migrating to latest: %v", err)
+	}
+
+	// The 002 backfill row must survive 003's table rebuild.
+	var defaultSiteID int64
+	if err := sqlDB.QueryRowContext(ctx, "SELECT id FROM sites WHERE key = 'default'").Scan(&defaultSiteID); err != nil {
+		t.Fatalf("looking up default site after 003: %v", err)
+	}
+
+	// Two sites sharing a hostname is what 002 forbade and 003 allows.
+	if _, err := sqlDB.ExecContext(ctx,
+		"INSERT INTO sites (key, hostname) VALUES ('renamed', ?)",
+		"shared.example.com"); err != nil {
+		t.Fatalf("inserting site: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		"INSERT INTO sites (key, hostname) VALUES ('other', ?)",
+		"shared.example.com"); err != nil {
+		t.Errorf("expected duplicate hostname to be allowed after 003, got: %v", err)
+	}
+
+	// key must still be unique -- 003 only dropped the hostname constraint.
+	if _, err := sqlDB.ExecContext(ctx,
+		"INSERT INTO sites (key, hostname) VALUES ('renamed', 'elsewhere.example.com')"); err == nil {
+		t.Error("expected duplicate site key to still fail after 003")
+	}
+
+	// The rebuilt table must still be a usable FK parent, and rejecting an
+	// unknown site_id is what proves the FK survived the rename dance.
+	now := "2026-01-01 00:00:00"
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO posts (site_id, slug, title, body, published, created_at, updated_at)
+		 VALUES (?, 'after-003', 'After 003', 'body', 1, ?, ?)`,
+		defaultSiteID, now, now); err != nil {
+		t.Errorf("inserting a post against the rebuilt sites table: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(ctx,
+		`INSERT INTO posts (site_id, slug, title, body, published, created_at, updated_at)
+		 VALUES (9999, 'orphan', 'Orphan', 'body', 1, ?, ?)`,
+		now, now); err == nil {
+		t.Error("expected a post referencing a nonexistent site_id to fail the FK")
+	}
+
+	fkRows, err := sqlDB.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		t.Fatalf("foreign_key_check: %v", err)
+	}
+	var violations int
+	for fkRows.Next() {
+		violations++
+	}
+	fkRows.Close()
+	if err := fkRows.Err(); err != nil {
+		t.Fatalf("iterating foreign_key_check rows: %v", err)
+	}
+	if violations != 0 {
+		t.Errorf("foreign_key_check after 003: expected no violations, got %d", violations)
+	}
+}
