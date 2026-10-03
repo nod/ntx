@@ -26,7 +26,7 @@ func TestSessionRoundtrip(t *testing.T) {
 	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
 
 	w := httptest.NewRecorder()
-	sm.SetSession(w)
+	sm.SetSession(w, 42)
 
 	resp := w.Result()
 	cookies := resp.Cookies()
@@ -40,17 +40,23 @@ func TestSessionRoundtrip(t *testing.T) {
 	if !sm.IsAuthenticated(req) {
 		t.Error("valid session not authenticated")
 	}
+	siteID, ok := sm.SessionSiteID(req)
+	if !ok {
+		t.Fatal("expected a valid session")
+	}
+	if siteID != 42 {
+		t.Errorf("expected siteID 42, got %d", siteID)
+	}
 }
 
 func TestSessionTampering(t *testing.T) {
 	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
 
 	w := httptest.NewRecorder()
-	sm.SetSession(w)
+	sm.SetSession(w, 1)
 	resp := w.Result()
 	cookie := resp.Cookies()[0]
 
-	// tamper with cookie value
 	cookie.Value = cookie.Value + "x"
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -74,7 +80,7 @@ func TestDifferentSecrets(t *testing.T) {
 	sm2 := NewSessionManager("secret-two-1234567890abcdef1234", false)
 
 	w := httptest.NewRecorder()
-	sm1.SetSession(w)
+	sm1.SetSession(w, 1)
 	cookie := w.Result().Cookies()[0]
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -85,10 +91,11 @@ func TestDifferentSecrets(t *testing.T) {
 	}
 }
 
-func TestMiddlewareRedirects(t *testing.T) {
+func TestMiddlewareRedirectsWhenUnauthenticated(t *testing.T) {
 	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
 
-	handler := sm.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	currentSite := func(*http.Request) int64 { return 1 }
+	handler := sm.Middleware(currentSite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -101,11 +108,77 @@ func TestMiddlewareRedirects(t *testing.T) {
 	}
 }
 
+func TestMiddlewareAllowsMatchingSite(t *testing.T) {
+	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
+
+	w := httptest.NewRecorder()
+	sm.SetSession(w, 1)
+	cookie := w.Result().Cookies()[0]
+
+	currentSite := func(*http.Request) int64 { return 1 }
+	handler := sm.Middleware(currentSite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/posts", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestMiddlewareRejectsMismatchedSite(t *testing.T) {
+	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
+
+	w := httptest.NewRecorder()
+	sm.SetSession(w, 1)
+	cookie := w.Result().Cookies()[0]
+
+	currentSite := func(*http.Request) int64 { return 2 }
+	handler := sm.Middleware(currentSite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/posts", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Errorf("expected redirect for mismatched site, got %d", rec.Code)
+	}
+}
+
+func TestMiddlewareAllowsGlobalSessionOnAnySite(t *testing.T) {
+	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
+
+	w := httptest.NewRecorder()
+	sm.SetSession(w, GlobalSiteID)
+	cookie := w.Result().Cookies()[0]
+
+	currentSite := func(*http.Request) int64 { return 99 }
+	handler := sm.Middleware(currentSite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/posts", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected global session to pass on any site, got %d", rec.Code)
+	}
+}
+
 func TestClearSession(t *testing.T) {
 	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
 
 	w := httptest.NewRecorder()
-	sm.SetSession(w)
+	sm.SetSession(w, 1)
 	cookie := w.Result().Cookies()[0]
 
 	w2 := httptest.NewRecorder()
@@ -125,9 +198,8 @@ func TestClearSession(t *testing.T) {
 func TestSessionExpiry(t *testing.T) {
 	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
 
-	// Build a valid-signature cookie with an issuedAt > 24h ago.
 	expired := time.Now().Add(-25 * time.Hour).Unix()
-	payload := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%d", expired)))
+	payload := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%d:%d", expired, 1)))
 	sig := sm.sign(payload)
 	value := payload + "." + sig
 
