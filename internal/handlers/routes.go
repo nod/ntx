@@ -60,6 +60,14 @@ func (h *Handler) Mount(r chi.Router) {
 		r.Post("/admin/platform/sites/{key}", h.PlatformUpdateSite)
 		r.Get("/admin/platform/sites/{key}/delete", h.PlatformDeleteSiteForm)
 		r.Post("/admin/platform/sites/{key}/delete", h.PlatformDeleteSite)
+		r.Get("/admin/platform/users", h.PlatformUsers)
+		r.Get("/admin/platform/users/{id}", h.PlatformUser)
+		r.Post("/admin/platform/users/{id}", h.PlatformUpdateUser)
+		r.Post("/admin/platform/users/{id}/memberships", h.PlatformAddMembership)
+		r.Post("/admin/platform/users/{id}/memberships/{key}/remove", h.PlatformRemoveMembership)
+		r.Post("/admin/platform/users/{id}/identities/{identityID}/unlink", h.PlatformUnlinkIdentity)
+		r.Post("/admin/platform/users/{id}/revoke", h.PlatformRevokeSessions)
+		r.Post("/admin/platform/users/{id}/delete", h.PlatformDeleteUser)
 	})
 
 	// Registered last: chi prefers static segments, so /blog/{slug},

@@ -18,7 +18,9 @@ import (
 	"github.com/nod/ntx/internal/db"
 	"github.com/nod/ntx/internal/handlers"
 	"github.com/nod/ntx/internal/models"
+	"github.com/nod/ntx/internal/people"
 	"github.com/nod/ntx/internal/sitereg"
+	"github.com/nod/ntx/internal/sso"
 )
 
 const platformHost = "admin.example.com"
@@ -86,10 +88,15 @@ func setup(t *testing.T) *env {
 		PlatformHostname: platformHost,
 		RootPasswordHash: rootHash,
 	}
-	am := auth.NewManager(models.NewSessionStore(d), users, models.NewMembershipStore(d), rootHash, false)
+	mems, sessions := models.NewMembershipStore(d), models.NewSessionStore(d)
+	ids, invites := models.NewIdentityStore(d), models.NewInviteStore(d)
+	am := auth.NewManager(sessions, users, mems, rootHash, false)
 	posts := models.NewPostStore(d)
 	h := handlers.New(handlers.Deps{
 		Sites: sites, Posts: posts, Users: users, Registry: reg, Auth: am,
+		Memberships: mems, Identities: ids, Invites: invites, Sessions: sessions,
+		People: people.New(users, ids, mems, invites), SSO: sso.NewClient(nil),
+		SessionSecret: []byte("session-secret-session-secret-xx"), EncryptionKey: []byte("0123456789abcdef0123456789abcdef"),
 		Limiter: auth.NewLimiter(), ThemesPath: themesRoot, PlatformHostname: platformHost,
 		RootPasswordHash: rootHash, Dev: true,
 	})

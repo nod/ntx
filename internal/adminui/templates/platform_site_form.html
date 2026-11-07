@@ -28,6 +28,26 @@
       {{$cur := ""}}{{with $f}}{{$cur = .Theme}}{{end}}
       {{range .Themes}}<option value="{{.}}"{{if eq . $cur}} selected{{end}}>{{.}}</option>{{end}}
     </select>
+    {{if not .IsNew}}
+    <h2>sign-in provider</h2>
+    {{$pt := ""}}{{with $f}}{{$pt = .ProviderType}}{{end}}
+    <label for="provider_type">provider</label>
+    <select id="provider_type" name="provider_type">
+      <option value=""{{if eq $pt ""}} selected{{end}}>none (only root can sign in)</option>
+      <option value="google"{{if eq $pt "google"}} selected{{end}}>Google</option>
+      <option value="auth0"{{if eq $pt "auth0"}} selected{{end}}>Auth0</option>
+    </select>
+    <label for="provider_domain">Auth0 domain</label>
+    <input type="text" id="provider_domain" name="provider_domain" value="{{with $f}}{{.ProviderDomain}}{{end}}" placeholder="acme.us.auth0.com">
+    <label for="provider_client_id">client ID</label>
+    <input type="text" id="provider_client_id" name="provider_client_id" value="{{with $f}}{{.ProviderClientID}}{{end}}" autocomplete="off">
+    <label for="provider_client_secret">client secret</label>
+    <input type="password" id="provider_client_secret" name="provider_client_secret" value="" autocomplete="new-password">
+    <p class="hint">{{with $f}}{{if .ProviderSecretSet}}A client secret is stored.{{else}}No client secret stored.{{end}}{{end}}
+      Leave blank to keep it. Changing the provider, domain or client ID needs the secret entered again.</p>
+    <label for="callback_url">callback URL (register this with the provider)</label>
+    <input type="text" id="callback_url" value="{{.CallbackURL}}" readonly class="copy">
+    {{end}}
     <div class="actions">
       <button type="submit" class="primary">{{if .IsNew}}create site{{else}}save{{end}}</button>
       {{if not .IsNew}}{{with $f}}<a href="/admin/platform/sites/{{.Key}}/delete" class="button danger">delete site…</a>{{end}}{{end}}

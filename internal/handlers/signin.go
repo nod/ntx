@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"time"
 
@@ -21,11 +22,16 @@ const flowCookie = "ntx_oauth"
 var errSecret = errors.New("the provider's client secret can't be decrypted")
 
 // externalURL is where a path on site is reached from outside: https on
-// the site's hostname, or in dev mode whatever scheme and host (port
-// included) this request came in on.
+// the site's hostname, or in dev mode this request's scheme and port on the
+// site's hostname (dev servers run on a port; r may be on another host,
+// such as the platform host showing a site's callback URL).
 func (h *Handler) externalURL(r *http.Request, site *models.Site, path string) string {
 	if h.d.Dev {
-		return clientip.Scheme(r) + "://" + r.Host + path
+		port := ""
+		if _, p, err := net.SplitHostPort(r.Host); err == nil {
+			port = ":" + p
+		}
+		return clientip.Scheme(r) + "://" + site.Hostname + port + path
 	}
 	return "https://" + site.Hostname + path
 }

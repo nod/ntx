@@ -6,12 +6,12 @@
     <a href="/admin/platform/sites/new" class="button primary">new site</a>
   </div>
   <table>
-    <thead><tr><th>key</th><th>hostname</th><th>name</th><th>theme</th></tr></thead>
+    <thead><tr><th>key</th><th>hostname</th><th>name</th><th>theme</th><th>provider</th><th>members</th></tr></thead>
     <tbody>
     {{range .Sites}}
-      <tr><td><a href="/admin/platform/sites/{{.Key}}">{{.Key}}</a></td><td>{{.Hostname}}</td><td>{{.Name}}</td><td>{{.Theme}}</td></tr>
+      <tr><td><a href="/admin/platform/sites/{{.Key}}">{{.Key}}</a></td><td>{{.Hostname}}</td><td>{{.Name}}</td><td>{{.Theme}}</td><td>{{with .Provider}}{{.}}{{else}}<span class="muted">none</span>{{end}}</td><td>{{.Members}}</td></tr>
     {{else}}
-      <tr><td colspan="4" class="muted">no sites yet</td></tr>
+      <tr><td colspan="6" class="muted">no sites yet</td></tr>
     {{end}}
     </tbody>
   </table>

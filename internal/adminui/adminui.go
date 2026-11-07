@@ -19,7 +19,7 @@ var files embed.FS
 
 var pageNames = []string{
 	"login", "posts", "editor", "settings", "platform_sites", "platform_site_form", "platform_site_delete",
-	"message", "signed_in", "invite", "members",
+	"message", "signed_in", "invite", "members", "platform_users", "platform_user",
 }
 
 // pages holds one template set per page: the shared layout plus that page.

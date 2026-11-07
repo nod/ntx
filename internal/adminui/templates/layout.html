@@ -14,7 +14,7 @@
     {{with .Actor}}
     <nav>
       {{if $.Site}}<a href="/admin/posts">posts</a>{{if $.IsSiteAdmin}}<a href="/admin/members">members</a><a href="/admin/settings">settings</a>{{end}}{{end}}
-      {{if .IsPlatform}}<a href="/admin/platform/sites">sites</a>{{end}}
+      {{if .IsPlatform}}<a href="/admin/platform/sites">sites</a><a href="/admin/platform/users">users</a>{{end}}
       <form method="POST" action="/admin/logout" class="inline"><button type="submit" class="link">sign out</button></form>
     </nav>
     {{end}}

@@ -1,0 +1,62 @@
+{{define "title"}}user{{end}}
+{{define "content"}}
+<section>
+  {{$t := .Target}}
+  <div class="row">
+    <h1>{{if $t.IsRoot}}root{{else}}{{$t.Email}}{{end}}</h1>
+    <a href="/admin/platform/users" class="button">back</a>
+  </div>
+  {{if not .Changeable}}
+  <p class="hint">Root is managed in the config file: its password lives in <code>root_password_hash</code>, and it can't be changed, demoted or deleted here.</p>
+  {{else}}
+  <form method="POST" action="/admin/platform/users/{{$t.ID}}" class="stack">
+    <label for="email">email</label>
+    <input type="email" id="email" name="email" value="{{$t.Email}}" required>
+    <label><input type="checkbox" name="platform_admin"{{if $t.IsPlatformAdmin}} checked{{end}}> platform admin (all sites, all users)</label>
+    <div class="actions"><button type="submit" class="primary">save</button></div>
+  </form>
+
+  <h2>sites</h2>
+  <table>
+    <thead><tr><th>site</th><th>role</th><th>can publish</th><th></th></tr></thead>
+    <tbody>
+    {{range .Memberships}}
+      <tr><td>{{.SiteKey}}</td><td>{{.Role}}</td><td>{{if .CanPublish}}yes{{end}}</td>
+        <td><form method="POST" action="/admin/platform/users/{{$t.ID}}/memberships/{{.SiteKey}}/remove" class="inline">
+          <button type="submit" class="danger" data-confirm="Remove from {{.SiteKey}}?">remove</button></form></td></tr>
+    {{else}}
+      <tr><td colspan="4" class="muted">no memberships</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+  <form method="POST" action="/admin/platform/users/{{$t.ID}}/memberships" class="inline">
+    <select name="site" aria-label="site">{{range .Sites}}<option value="{{.Key}}">{{.Key}}</option>{{end}}</select>
+    <select name="role" aria-label="role"><option value="contributor">contributor</option><option value="admin">admin</option></select>
+    <label><input type="checkbox" name="can_publish"> can publish</label>
+    <button type="submit">add to site</button>
+  </form>
+
+  <h2>sign-in identities</h2>
+  <table>
+    <thead><tr><th>issuer</th><th>email when linked</th><th></th></tr></thead>
+    <tbody>
+    {{range .Identities}}
+      <tr><td>{{.Issuer}}</td><td>{{.EmailAtLink}}</td>
+        <td><form method="POST" action="/admin/platform/users/{{$t.ID}}/identities/{{.ID}}/unlink" class="inline">
+          <button type="submit" data-confirm="Unlink this login? Their next sign-in will match by email.">unlink</button></form></td></tr>
+    {{else}}
+      <tr><td colspan="3" class="muted">not signed in yet</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+
+  <h2>danger</h2>
+  <div class="actions">
+    <form method="POST" action="/admin/platform/users/{{$t.ID}}/revoke" class="inline">
+      <button type="submit" data-confirm="Sign {{$t.Email}} out everywhere?">sign out everywhere</button></form>
+    <form method="POST" action="/admin/platform/users/{{$t.ID}}/delete" class="inline">
+      <button type="submit" class="danger" data-confirm="Delete {{$t.Email}}? Their posts stay, shown as a former member.">delete person</button></form>
+  </div>
+  {{end}}
+</section>
+{{end}}

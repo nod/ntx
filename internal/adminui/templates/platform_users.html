@@ -1,0 +1,20 @@
+{{define "title"}}users{{end}}
+{{define "content"}}
+<section>
+  <h1>users</h1>
+  <table>
+    <thead><tr><th>email</th><th>name</th><th>sites</th><th></th></tr></thead>
+    <tbody>
+    {{range .Users}}
+      <tr>
+        <td><a href="/admin/platform/users/{{.ID}}">{{if .IsRoot}}root{{else}}{{.Email}}{{end}}</a></td>
+        <td>{{.Name}}</td>
+        <td>{{range $i, $m := .Memberships}}{{if $i}}, {{end}}{{$m.SiteKey}}: {{$m.Role}}{{end}}</td>
+        <td>{{if .IsRoot}}<span class="badge">root</span>{{else if .IsPlatformAdmin}}<span class="badge ok">platform admin</span>{{end}}</td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  <p class="hint">People are added to a site from that site's members page, or below on a person's page.</p>
+</section>
+{{end}}
