@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -311,5 +313,23 @@ func TestSecurityHeaders(t *testing.T) {
 	}
 	if resp.Header.Get("X-Frame-Options") != "DENY" {
 		t.Error("X-Frame-Options must be DENY")
+	}
+}
+
+// Behind a proxy, logs must name the real client (from the trusted
+// proxy's X-Forwarded-For), not the proxy.
+func TestRequestLogShowsClientIP(t *testing.T) {
+	e := setup(t)
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	e.do(http.MethodGet, "a.example.com", "/", nil, map[string]string{"X-Forwarded-For": "203.0.113.9"}, nil)
+	out := buf.String()
+	if !strings.Contains(out, "203.0.113.9") {
+		t.Errorf("request log must show the client IP, got: %s", out)
+	}
+	if !strings.Contains(out, "a.example.com") || !strings.Contains(out, " 200 ") {
+		t.Errorf("request log must show host and status, got: %s", out)
 	}
 }

@@ -5,6 +5,7 @@ package server
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -24,7 +25,7 @@ import (
 func New(cfg *config.Config, h *handlers.Handler, reg *sitereg.Registry, am *auth.Manager) *http.Server {
 	r := chi.NewRouter()
 	r.Use(clientip.Middleware(cfg.TrustedProxies))
-	r.Use(middleware.Logger)
+	r.Use(requestLog)
 	r.Use(middleware.Recoverer)
 	r.Use(securityHeaders)
 	r.Use(resolveHost(reg, cfg.PlatformHostname))
@@ -50,6 +51,23 @@ func New(cfg *config.Config, h *handlers.Handler, reg *sitereg.Registry, am *aut
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
+}
+
+// requestLog logs one line per request with the real client IP (see
+// clientip), so behind a proxy the log names the client, not the proxy.
+func requestLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		next.ServeHTTP(ww, r)
+		status := ww.Status()
+		if status == 0 {
+			status = http.StatusOK
+		}
+		log.Printf("%s %s %s://%s%s %d %dB %s from %s",
+			r.Method, r.Proto, clientip.Scheme(r), r.Host, r.URL.RequestURI(),
+			status, ww.BytesWritten(), time.Since(start).Round(time.Microsecond), clientip.IP(r))
+	})
 }
 
 func securityHeaders(next http.Handler) http.Handler {
