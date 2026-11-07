@@ -65,9 +65,21 @@ func requestLog(next http.Handler) http.Handler {
 			status = http.StatusOK
 		}
 		log.Printf("%s %s %s://%s%s %d %dB %s from %s",
-			r.Method, r.Proto, clientip.Scheme(r), r.Host, r.URL.RequestURI(),
+			r.Method, r.Proto, clientip.Scheme(r), r.Host, logPath(r),
 			status, ww.BytesWritten(), time.Since(start).Round(time.Microsecond), clientip.IP(r))
 	})
+}
+
+// logPath is the request URI with secrets taken out: invite tokens (in the
+// path) and the provider's code and state (in the callback's query).
+func logPath(r *http.Request) string {
+	switch p := r.URL.EscapedPath(); {
+	case strings.HasPrefix(p, "/invite/"):
+		return "/invite/[redacted]"
+	case p == "/auth/callback":
+		return p
+	}
+	return r.URL.RequestURI()
 }
 
 func securityHeaders(next http.Handler) http.Handler {

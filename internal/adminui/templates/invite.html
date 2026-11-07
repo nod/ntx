@@ -1,0 +1,12 @@
+{{define "title"}}invitation{{end}}
+{{define "content"}}
+<section class="narrow">
+  <h1>you're invited</h1>
+  <p>You've been invited to <strong>{{.Site.Name}}</strong> as <strong>{{.Invite.Role}}</strong>.
+     Sign in with {{.ProviderName}} using <strong>{{.Invite.Email}}</strong> to accept.</p>
+  <form method="POST" action="/auth/start">
+    <input type="hidden" name="invite" value="{{.Token}}">
+    <button type="submit" class="primary">Sign in with {{.ProviderName}}</button>
+  </form>
+</section>
+{{end}}

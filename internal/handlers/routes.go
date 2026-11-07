@@ -22,6 +22,11 @@ func (h *Handler) Mount(r chi.Router) {
 	r.Post("/admin/login", h.LoginPost)
 	r.Post("/admin/logout", h.Logout)
 
+	r.Get("/auth/start", h.AuthStart)
+	r.Post("/auth/start", h.AuthStart)
+	r.Get("/auth/callback", h.AuthCallback)
+	r.Get("/invite/{token}", h.InvitePage)
+
 	r.Group(func(r chi.Router) {
 		r.Use(h.RequireSiteAdmin)
 		r.Get("/admin/posts", h.Posts)

@@ -58,7 +58,7 @@ type Manager struct {
 	users       *models.UserStore
 	memberships *models.MembershipStore
 	rootDigest  string
-	secure     bool
+	secure      bool
 }
 
 func NewManager(sessions *models.SessionStore, users *models.UserStore, memberships *models.MembershipStore, rootPasswordHash string, secure bool) *Manager {

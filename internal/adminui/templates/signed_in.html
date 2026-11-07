@@ -1,0 +1,12 @@
+{{define "title"}}signed in{{end}}
+{{/* The session cookie is SameSite=Strict and this response ends a chain
+     that started at the provider, so a redirect would arrive without it.
+     A meta refresh makes the next navigation same-site. No script: the
+     CSP forbids inline JS. */}}
+{{define "head"}}<meta http-equiv="refresh" content="0;url=/admin/posts">{{end}}
+{{define "content"}}
+<section class="narrow">
+  <h1>signed in</h1>
+  <p><a href="/admin/posts" class="button primary">continue</a></p>
+</section>
+{{end}}

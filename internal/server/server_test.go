@@ -333,3 +333,22 @@ func TestRequestLogShowsClientIP(t *testing.T) {
 		t.Errorf("request log must show host and status, got: %s", out)
 	}
 }
+
+func TestRequestLogRedactsTokens(t *testing.T) {
+	e := setup(t)
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	e.do(http.MethodGet, "a.example.com", "/invite/SECRET123", nil, nil, nil)
+	e.do(http.MethodGet, "a.example.com", "/auth/callback?code=CODE9&state=S", nil, nil, nil)
+	out := buf.String()
+	for _, secret := range []string{"SECRET123", "CODE9"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("request log leaks %q: %s", secret, out)
+		}
+	}
+	if !strings.Contains(out, "/invite/[redacted]") || !strings.Contains(out, "/auth/callback ") {
+		t.Errorf("request log should still show the redacted paths: %s", out)
+	}
+}

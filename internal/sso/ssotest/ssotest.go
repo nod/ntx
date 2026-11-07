@@ -50,6 +50,20 @@ type Provider struct {
 	grants map[string]grant
 }
 
+// One signing key per test binary: generating RSA keys is slow, and fakes
+// in one process never need to tell each other's tokens apart by key (their
+// issuers differ).
+var (
+	keyOnce   sync.Once
+	sharedKey *rsa.PrivateKey
+	keyErr    error
+)
+
+func signingKey() (*rsa.PrivateKey, error) {
+	keyOnce.Do(func() { sharedKey, keyErr = rsa.GenerateKey(rand.Reader, 2048) })
+	return sharedKey, keyErr
+}
+
 // New starts a fake provider, closed when the test ends.
 func New(t testing.TB) *Provider { return NewAt(t, "") }
 
@@ -57,7 +71,7 @@ func New(t testing.TB) *Provider { return NewAt(t, "") }
 // that was in use earlier in the test), or on a fresh port if baseURL is "".
 func NewAt(t testing.TB, baseURL string) *Provider {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := signingKey()
 	if err != nil {
 		t.Fatal(err)
 	}
