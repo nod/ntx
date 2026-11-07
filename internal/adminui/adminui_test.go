@@ -72,3 +72,34 @@ func TestUnknownPageIs500(t *testing.T) {
 		t.Errorf("unknown page: status %d", rec.Code)
 	}
 }
+
+type unsavedPost struct {
+	ID          int64
+	Title, Slug string
+	Body        string
+	Tags        []string
+}
+
+// When a new post fails to save (say, a bad slug), the editor comes back
+// with the typed post, which has no ID yet. It must still post to the
+// create route, or fixing the slug and resubmitting 404s and loses the text.
+func TestEditorForUnsavedPostPostsToCreate(t *testing.T) {
+	rec := httptest.NewRecorder()
+	Render(rec, "editor", map[string]any{"Post": &unsavedPost{Title: "Draft", Slug: "Bad Slug", Body: "long text"}})
+	body := rec.Body.String()
+	if !strings.Contains(body, `action="/admin/posts"`) {
+		t.Errorf("an unsaved post's form must post to /admin/posts: %s", body)
+	}
+	if strings.Contains(body, "/admin/posts/0") || strings.Contains(body, `value="delete"`) {
+		t.Errorf("an unsaved post must not get an edit action or a delete button: %s", body)
+	}
+	if !strings.Contains(body, "long text") {
+		t.Error("the typed text must be kept")
+	}
+
+	rec = httptest.NewRecorder()
+	Render(rec, "editor", map[string]any{"Post": &unsavedPost{ID: 7, Title: "Saved", Slug: "saved"}})
+	if !strings.Contains(rec.Body.String(), `action="/admin/posts/7"`) || !strings.Contains(rec.Body.String(), `value="delete"`) {
+		t.Errorf("a saved post's form must post to its own route with delete: %s", rec.Body.String())
+	}
+}

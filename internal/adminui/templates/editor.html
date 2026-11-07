@@ -1,11 +1,13 @@
-{{define "title"}}{{if .Post}}edit post{{else}}new post{{end}}{{end}}
+{{define "title"}}{{if and .Post .Post.ID}}edit post{{else}}new post{{end}}{{end}}
 {{define "content"}}
 <section>
   <div class="row">
-    <h1>{{if .Post}}edit post{{else}}new post{{end}}</h1>
+    <h1>{{if and .Post .Post.ID}}edit post{{else}}new post{{end}}</h1>
     <a href="/admin/posts" class="button">back</a>
   </div>
-  <form method="POST" action="{{with .Post}}/admin/posts/{{.ID}}{{else}}/admin/posts{{end}}" class="stack">
+  {{/* A post that failed to save before it was ever created comes back
+       with ID 0: it is still a new post. */}}
+  <form method="POST" action="{{if and .Post .Post.ID}}/admin/posts/{{.Post.ID}}{{else}}/admin/posts{{end}}" class="stack">
     <label for="title">title</label>
     <input type="text" id="title" name="title" value="{{with .Post}}{{.Title}}{{end}}" data-slug-source="slug" required>
     <label for="slug">slug</label>
@@ -17,7 +19,7 @@
     <div class="actions">
       <button type="submit" name="action" value="save">save</button>
       <button type="submit" name="action" value="publish" class="primary">publish</button>
-      {{if .Post}}
+      {{if and .Post .Post.ID}}
       <button type="submit" name="action" value="unpublish">unpublish</button>
       <button type="submit" name="action" value="delete" class="danger" data-confirm="Delete this post?">delete</button>
       {{end}}
