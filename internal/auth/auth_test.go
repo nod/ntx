@@ -1,12 +1,12 @@
 package auth
 
 import (
-	"encoding/base64"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
+
+	"github.com/nod/ntx/internal/db"
+	"github.com/nod/ntx/internal/models"
 )
 
 func TestHashAndCheck(t *testing.T) {
@@ -22,305 +22,167 @@ func TestHashAndCheck(t *testing.T) {
 	}
 }
 
-func TestSessionRoundtrip(t *testing.T) {
-	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
-
-	w := httptest.NewRecorder()
-	sm.SetSiteSession(w, 42)
-
-	resp := w.Result()
-	cookies := resp.Cookies()
-	if len(cookies) == 0 {
-		t.Fatal("no cookie set")
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.AddCookie(cookies[0])
-
-	sess, ok := sm.Session(req)
-	if !ok {
-		t.Fatal("expected a valid session")
-	}
-	if sess.Global || sess.SiteID != 42 {
-		t.Errorf("expected a site session for 42, got %+v", sess)
-	}
+type env struct {
+	sessions *models.SessionStore
+	users    *models.UserStore
+	root     *models.User
+	siteID   int64
 }
 
-func TestSessionTampering(t *testing.T) {
-	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
-
-	w := httptest.NewRecorder()
-	sm.SetSiteSession(w, 1)
-	resp := w.Result()
-	cookie := resp.Cookies()[0]
-
-	cookie.Value = cookie.Value + "x"
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.AddCookie(cookie)
-
-	if _, ok := sm.Session(req); ok {
-		t.Error("tampered session accepted")
+func newEnv(t *testing.T) *env {
+	t.Helper()
+	d, err := db.Open("sqlite://:memory:")
+	if err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(func() { s, _ := d.DB(); s.Close() })
+	users := models.NewUserStore(d)
+	root, err := users.EnsureRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	site := &models.Site{Key: "a", Hostname: "a.example.com", Theme: "default"}
+	if err := models.NewSiteStore(d).Create(site, "admin.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	// A non-root user, inserted directly: phase 1 has no way to create one.
+	if err := d.Exec("INSERT INTO users (id, email, name, is_root, is_platform_admin, created_at) VALUES (50, 'x@example.com', 'x', 0, 1, CURRENT_TIMESTAMP)").Error; err != nil {
+		t.Fatal(err)
+	}
+	return &env{sessions: models.NewSessionStore(d), users: users, root: root, siteID: site.ID}
 }
 
-func TestSessionMissing(t *testing.T) {
-	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	if _, ok := sm.Session(req); ok {
-		t.Error("unauthenticated request passed")
-	}
+func (e *env) manager(rootHash string) *Manager {
+	return NewManager(e.sessions, e.users, rootHash, true)
 }
 
-func TestDifferentSecrets(t *testing.T) {
-	sm1 := NewSessionManager("secret-one-1234567890abcdef1234", false)
-	sm2 := NewSessionManager("secret-two-1234567890abcdef1234", false)
-
-	w := httptest.NewRecorder()
-	sm1.SetSiteSession(w, 1)
-	cookie := w.Result().Cookies()[0]
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.AddCookie(cookie)
-
-	if _, ok := sm2.Session(req); ok {
-		t.Error("session from different secret accepted")
-	}
-}
-
-func TestMiddlewareRedirectsWhenUnauthenticated(t *testing.T) {
-	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
-
-	currentSite := func(*http.Request) (int64, bool) { return 1, true }
-	handler := sm.Middleware(currentSite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest(http.MethodGet, "/admin/posts", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	if w.Code != http.StatusSeeOther {
-		t.Errorf("expected redirect, got %d", w.Code)
-	}
-}
-
-func TestMiddlewareAllowsMatchingSite(t *testing.T) {
-	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
-
-	w := httptest.NewRecorder()
-	sm.SetSiteSession(w, 1)
-	cookie := w.Result().Cookies()[0]
-
-	currentSite := func(*http.Request) (int64, bool) { return 1, true }
-	handler := sm.Middleware(currentSite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest(http.MethodGet, "/admin/posts", nil)
-	req.AddCookie(cookie)
+// login signs user in through m and returns the session cookie.
+func login(t *testing.T, m *Manager, user *models.User, siteID *int64) *http.Cookie {
+	t.Helper()
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", rec.Code)
+	if err := m.Login(rec, user, siteID); err != nil {
+		t.Fatal(err)
 	}
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "ntx_session" {
+			return c
+		}
+	}
+	t.Fatal("Login set no ntx_session cookie")
+	return nil
 }
 
-func TestMiddlewareRejectsMismatchedSite(t *testing.T) {
-	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
-
-	w := httptest.NewRecorder()
-	sm.SetSiteSession(w, 1)
-	cookie := w.Result().Cookies()[0]
-
-	currentSite := func(*http.Request) (int64, bool) { return 2, true }
-	handler := sm.Middleware(currentSite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
+// actorFor runs a request carrying cookie through m.Middleware, as if on
+// the host current describes, and returns the Actor the handler saw.
+func actorFor(m *Manager, cookie *http.Cookie, siteID int64, onSite bool) *Actor {
+	var got *Actor
+	h := m.Middleware(func(*http.Request) (int64, bool) { return siteID, onSite })(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got = ActorFrom(r) }))
 	req := httptest.NewRequest(http.MethodGet, "/admin/posts", nil)
-	req.AddCookie(cookie)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	return got
+}
 
-	if rec.Code != http.StatusSeeOther {
-		t.Errorf("expected redirect for mismatched site, got %d", rec.Code)
+const hash1 = "$2a$10$XKhLm60v72htK/lAO26kDuWPXh.3DovbWhmC/tN.E1UIzH0D.moZ."
+
+func TestRootSessionValidOnIssuingSiteOnly(t *testing.T) {
+	e := newEnv(t)
+	m := e.manager(hash1)
+	c := login(t, m, e.root, &e.siteID)
+
+	if a := actorFor(m, c, e.siteID, true); a == nil || !a.IsRoot() || !a.IsPlatform() || !a.CanAdminSite() {
+		t.Fatalf("root session on its own site: got %+v", a)
+	}
+	if a := actorFor(m, c, e.siteID+1, true); a != nil {
+		t.Error("a session for one site must not authenticate on another")
+	}
+	if a := actorFor(m, c, 0, false); a != nil {
+		t.Error("a site session must not authenticate on the platform host")
 	}
 }
 
-func TestMiddlewareAllowsGlobalSessionOnAnySite(t *testing.T) {
-	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
-
-	w := httptest.NewRecorder()
-	sm.SetGlobalSession(w)
-	cookie := w.Result().Cookies()[0]
-
-	currentSite := func(*http.Request) (int64, bool) { return 99, true }
-	handler := sm.Middleware(currentSite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest(http.MethodGet, "/admin/posts", nil)
-	req.AddCookie(cookie)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected global session to pass on any site, got %d", rec.Code)
+func TestPlatformHostSession(t *testing.T) {
+	e := newEnv(t)
+	m := e.manager(hash1)
+	c := login(t, m, e.root, nil)
+	if a := actorFor(m, c, 0, false); a == nil || !a.IsRoot() {
+		t.Fatalf("platform-host session on the platform host: got %+v", a)
+	}
+	if a := actorFor(m, c, e.siteID, true); a != nil {
+		t.Error("a platform-host session must not authenticate on a site")
 	}
 }
 
-func TestClearSession(t *testing.T) {
-	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
+// Changing root_password_hash in config and restarting must end every
+// existing root session.
+func TestRootSessionInvalidAfterPasswordChange(t *testing.T) {
+	e := newEnv(t)
+	c := login(t, e.manager(hash1), e.root, &e.siteID)
+	hash2, _ := HashPassword("another")
+	if a := actorFor(e.manager(hash2), c, e.siteID, true); a != nil {
+		t.Error("a root session issued under the old password hash must be rejected")
+	}
+}
 
-	w := httptest.NewRecorder()
-	sm.SetSiteSession(w, 1)
-	cookie := w.Result().Cookies()[0]
+func TestCookieAttributes(t *testing.T) {
+	e := newEnv(t)
+	for _, secure := range []bool{true, false} {
+		m := NewManager(e.sessions, e.users, hash1, secure)
+		c := login(t, m, e.root, &e.siteID)
+		if !c.HttpOnly || c.SameSite != http.SameSiteStrictMode || c.Path != "/" || c.Domain != "" || c.Secure != secure {
+			t.Errorf("secure=%v: unexpected cookie attributes %+v", secure, c)
+		}
+	}
+}
 
-	w2 := httptest.NewRecorder()
+func TestLogoutDeletesSession(t *testing.T) {
+	e := newEnv(t)
+	m := e.manager(hash1)
+	c := login(t, m, e.root, &e.siteID)
 	req := httptest.NewRequest(http.MethodPost, "/admin/logout", nil)
-	req.AddCookie(cookie)
-	sm.ClearSession(w2)
-
-	cleared := w2.Result().Cookies()
-	for _, c := range cleared {
-		if c.Name == cookieName && c.MaxAge < 0 {
-			return
+	req.AddCookie(c)
+	rec := httptest.NewRecorder()
+	if err := m.Logout(rec, req); err != nil {
+		t.Fatal(err)
+	}
+	if a := actorFor(m, c, e.siteID, true); a != nil {
+		t.Error("a logged-out session must not authenticate")
+	}
+	cleared := false
+	for _, rc := range rec.Result().Cookies() {
+		if rc.Name == "ntx_session" && rc.MaxAge < 0 {
+			cleared = true
 		}
 	}
-	t.Error("session cookie not cleared")
-}
-
-func TestSessionExpiry(t *testing.T) {
-	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
-
-	expired := time.Now().Add(-25 * time.Hour).Unix()
-	payload := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%d:site:%d", expired, 1)))
-	sig := sm.sign(payload)
-	value := payload + "." + sig
-
-	req := httptest.NewRequest(http.MethodGet, "/admin/posts", nil)
-	req.AddCookie(&http.Cookie{Name: cookieName, Value: value})
-
-	if _, ok := sm.Session(req); ok {
-		t.Error("expired session accepted")
+	if !cleared {
+		t.Error("Logout must clear the cookie")
 	}
 }
 
-func TestMiddlewareRejectsExpiredSession(t *testing.T) {
-	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
-
-	// Validly signed, but issued outside sessionMaxAge.
-	expired := time.Now().Add(-25 * time.Hour).Unix()
-	payload := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%d:site:%d", expired, 1)))
-	sig := sm.sign(payload)
-	value := payload + "." + sig
-
-	// currentSite matches the cookie's siteID (1), so this would pass if
-	// the session were merely scope-matched but not expired: a failure
-	// here can only be attributed to the expiry check.
-	currentSite := func(*http.Request) (int64, bool) { return 1, true }
-	handler := sm.Middleware(currentSite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest(http.MethodGet, "/admin/posts", nil)
-	req.AddCookie(&http.Cookie{Name: cookieName, Value: value})
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusSeeOther {
-		t.Errorf("expected redirect for expired session, got %d", rec.Code)
+// Phase 1 has no members: a session belonging to anyone but root is
+// invalid, platform admin flag or not.
+func TestNonRootSessionRejectedInPhase1(t *testing.T) {
+	e := newEnv(t)
+	m := e.manager(hash1)
+	other, err := e.users.GetByID(50)
+	if err != nil || other == nil {
+		t.Fatal(err)
+	}
+	c := login(t, m, other, &e.siteID)
+	if a := actorFor(m, c, e.siteID, true); a != nil {
+		t.Errorf("a non-root session must not authenticate in phase 1, got %+v", a)
 	}
 }
 
-// signedCookie forges a correctly signed session cookie around an arbitrary
-// payload, for asserting how verify treats payloads SetSession never writes.
-func signedCookie(sm *SessionManager, payload string) *http.Cookie {
-	enc := base64.StdEncoding.EncodeToString([]byte(payload))
-	return &http.Cookie{Name: cookieName, Value: enc + "." + sm.sign(enc)}
-}
-
-func TestGlobalSessionRoundtrip(t *testing.T) {
-	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
-	w := httptest.NewRecorder()
-	sm.SetGlobalSession(w)
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.AddCookie(w.Result().Cookies()[0])
-	sess, ok := sm.Session(req)
-	if !ok || !sess.Global {
-		t.Errorf("expected a valid global session, got %+v ok=%v", sess, ok)
+func TestNoCookieNoActor(t *testing.T) {
+	e := newEnv(t)
+	if a := actorFor(e.manager(hash1), nil, e.siteID, true); a != nil {
+		t.Error("no cookie must mean no actor")
 	}
-}
-
-// The heart of cleanup 6: a site ID of 0 -- Go's zero value, what an
-// un-persisted config.Site carries -- used to *be* the global marker, so a
-// site session minted from an unset ID authenticated everywhere. It must
-// grant nothing instead.
-func TestSiteSessionWithZeroIDIsNotGlobal(t *testing.T) {
-	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
-	w := httptest.NewRecorder()
-	sm.SetSiteSession(w, 0)
-	cookie := w.Result().Cookies()[0]
-
-	currentSite := func(*http.Request) (int64, bool) { return 99, true }
-	handler := sm.Middleware(currentSite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	req := httptest.NewRequest(http.MethodGet, "/admin/posts", nil)
-	req.AddCookie(cookie)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusSeeOther {
-		t.Errorf("a site session for id 0 must not pass on site 99, got %d", rec.Code)
-	}
-}
-
-// Payloads in the old "<ts>:<siteID>" format -- where "<ts>:0" meant
-// global -- and site payloads with a non-positive id must not verify.
-func TestMalformedSessionPayloadsRejected(t *testing.T) {
-	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
-	now := time.Now().Unix()
-	for _, payload := range []string{
-		fmt.Sprintf("%d:0", now),        // legacy global
-		fmt.Sprintf("%d:7", now),        // legacy site
-		fmt.Sprintf("%d:site:0", now),   // no real site has id 0
-		fmt.Sprintf("%d:site:-1", now),  // ...or a negative one
-		fmt.Sprintf("%d:site:", now),    // missing id
-		fmt.Sprintf("%d:site:7:x", now), // trailing junk
-		fmt.Sprintf("%d:global:7", now), // global carries no id
-		fmt.Sprintf("%d:admin", now),    // unknown kind
-		"notanumber:global",
-	} {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.AddCookie(signedCookie(sm, payload))
-		if sess, ok := sm.Session(req); ok {
-			t.Errorf("payload %q: expected rejection, got %+v", payload, sess)
-		}
-	}
-}
-
-// If the site can't be resolved the middleware must fail closed -- even
-// for a global session -- rather than rely on a sentinel id.
-func TestMiddlewareRejectsUnresolvedSite(t *testing.T) {
-	sm := NewSessionManager("supersecretkey1234567890abcdef12", false)
-	w := httptest.NewRecorder()
-	sm.SetGlobalSession(w)
-	cookie := w.Result().Cookies()[0]
-
-	currentSite := func(*http.Request) (int64, bool) { return 0, false }
-	handler := sm.Middleware(currentSite)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	req := httptest.NewRequest(http.MethodGet, "/admin/posts", nil)
-	req.AddCookie(cookie)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusSeeOther {
-		t.Errorf("expected redirect when no site is resolved, got %d", rec.Code)
+	if a := actorFor(e.manager(hash1), &http.Cookie{Name: "ntx_session", Value: "forged"}, e.siteID, true); a != nil {
+		t.Error("an unknown token must mean no actor")
 	}
 }

@@ -2,31 +2,16 @@ package models
 
 import (
 	"testing"
-
-	"github.com/nod/ntx/internal/db"
 )
 
 func newTestStores(t *testing.T) (siteA, siteB *PostStore) {
 	t.Helper()
-	database, err := db.Open("sqlite://:memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		sqlDB, _ := database.DB()
-		sqlDB.Close()
-	})
-	// The 001->002 migration backfills exactly one site ("default", id 1).
-	// posts.site_id/tags.site_id carry a NOT NULL FK to sites(id), enforced
-	// because db.Open turns on PRAGMA foreign_keys -- so site 2 needs a real
-	// row too, or every write through ForSite(2) below fails FK validation.
-	if err := database.Exec(
-		"INSERT INTO sites (key, hostname) VALUES (?, ?)", "site-b", "site-b.example.com",
-	).Error; err != nil {
-		t.Fatal(err)
-	}
+	database := newTestSiteDB(t)
+	sites := NewSiteStore(database)
+	a := mustCreateSite(t, sites, "site-a", "site-a.example.com")
+	b := mustCreateSite(t, sites, "site-b", "site-b.example.com")
 	raw := NewPostStore(database)
-	return raw.ForSite(1), raw.ForSite(2)
+	return raw.ForSite(a.ID), raw.ForSite(b.ID)
 }
 
 func newTestDB(t *testing.T) *PostStore {
@@ -286,10 +271,10 @@ func TestForSiteIsolatesReads(t *testing.T) {
 func TestTagNameUniquePerSiteNotGlobally(t *testing.T) {
 	siteA, siteB := newTestStores(t)
 
-	if err := siteA.Create(&Post{Slug: "a1", Title: "A1", Body: ".", Tags: []string{"shared"}}); err != nil {
+	if err := siteA.Create(&Post{Slug: "a1", Title: "A1", Body: ".", Published: true, Tags: []string{"shared"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := siteB.Create(&Post{Slug: "b1", Title: "B1", Body: ".", Tags: []string{"shared"}}); err != nil {
+	if err := siteB.Create(&Post{Slug: "b1", Title: "B1", Body: ".", Published: true, Tags: []string{"shared"}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -356,5 +341,66 @@ func TestUpdateCannotCrossSiteBoundary(t *testing.T) {
 	}
 	if len(got.Tags) != 1 || got.Tags[0] != "original" {
 		t.Errorf("tags were modified by a cross-site update: got %v", got.Tags)
+	}
+}
+
+func TestFirstPublishedAtSetOnceAndKept(t *testing.T) {
+	s := newTestDB(t)
+	p := &Post{Slug: "p", Title: "P", Body: "."}
+	if err := s.Create(p); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.GetByID(p.ID)
+	if got.FirstPublishedAt != nil {
+		t.Fatal("a draft must not have first_published_at")
+	}
+	p.Published = true
+	if err := s.Update(p); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.GetByID(p.ID)
+	if got.FirstPublishedAt == nil {
+		t.Fatal("publishing must set first_published_at")
+	}
+	first := *got.FirstPublishedAt
+
+	p.Published = false
+	s.Update(p)
+	p.Published = true
+	s.Update(p)
+	got, _ = s.GetByID(p.ID)
+	if got.FirstPublishedAt == nil || !got.FirstPublishedAt.Equal(first) {
+		t.Errorf("first_published_at must survive unpublish/republish unchanged: %v → %v", first, got.FirstPublishedAt)
+	}
+
+	q := &Post{Slug: "q", Title: "Q", Body: ".", Published: true}
+	if err := s.Create(q); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetByID(q.ID); got.FirstPublishedAt == nil {
+		t.Error("creating a published post must set first_published_at")
+	}
+}
+
+// A draft's tags must not leak onto public pages: a contributor without
+// can_publish could otherwise put arbitrary text in front of readers.
+func TestAllTagsOnlyFromPublishedPosts(t *testing.T) {
+	s := newTestDB(t)
+	if err := s.Create(&Post{Slug: "draft", Title: "D", Body: ".", Tags: []string{"secret"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Create(&Post{Slug: "live", Title: "L", Body: ".", Published: true, Tags: []string{"go"}}); err != nil {
+		t.Fatal(err)
+	}
+	tags, err := s.AllTags()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tags) != 1 || tags[0] != "go" {
+		t.Errorf("AllTags must list only tags on published posts, got %v", tags)
+	}
+	_, _, _, tagCount, err := s.Stats()
+	if err != nil || tagCount != 2 {
+		t.Errorf("admin Stats must still count every tag, got %d (%v)", tagCount, err)
 	}
 }

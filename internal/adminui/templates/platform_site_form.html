@@ -1,0 +1,37 @@
+{{define "title"}}{{if .IsNew}}new site{{else}}edit site{{end}}{{end}}
+{{define "content"}}
+<section>
+  <div class="row">
+    <h1>{{if .IsNew}}new site{{else}}edit site{{end}}</h1>
+    <a href="/admin/platform/sites" class="button">back</a>
+  </div>
+  {{$f := .Form}}
+  <form method="POST" action="{{if .IsNew}}/admin/platform/sites{{else}}/admin/platform/sites/{{with $f}}{{.Key}}{{end}}{{end}}" class="stack">
+    <label for="key">key</label>
+    {{if .IsNew}}
+    <input type="text" id="key" name="key" value="{{with $f}}{{.Key}}{{end}}" required>
+    <p class="hint">Lowercase letters, digits, <code>-</code> or <code>_</code>. Names the <code>ntx generate</code> output folder; can't be changed later.</p>
+    {{else}}
+    <input type="text" id="key" value="{{with $f}}{{.Key}}{{end}}" readonly>
+    {{end}}
+    <label for="hostname">hostname</label>
+    <input type="text" id="hostname" name="hostname" value="{{with $f}}{{.Hostname}}{{end}}" required>
+    {{if not .IsNew}}<p class="hint warn">Changing the hostname signs everyone out of this site; the provider callback URL and outstanding invite links must be updated.</p>{{end}}
+    <label for="name">name</label>
+    <input type="text" id="name" name="name" value="{{with $f}}{{.Name}}{{end}}">
+    <label for="description">description</label>
+    <input type="text" id="description" name="description" value="{{with $f}}{{.Description}}{{end}}">
+    <label for="about_slug">about slug</label>
+    <input type="text" id="about_slug" name="about_slug" value="{{with $f}}{{.AboutSlug}}{{else}}about{{end}}">
+    <label for="theme">theme</label>
+    <select id="theme" name="theme" required>
+      {{$cur := ""}}{{with $f}}{{$cur = .Theme}}{{end}}
+      {{range .Themes}}<option value="{{.}}"{{if eq . $cur}} selected{{end}}>{{.}}</option>{{end}}
+    </select>
+    <div class="actions">
+      <button type="submit" class="primary">{{if .IsNew}}create site{{else}}save{{end}}</button>
+      {{if not .IsNew}}{{with $f}}<a href="/admin/platform/sites/{{.Key}}/delete" class="button danger">delete site…</a>{{end}}{{end}}
+    </div>
+  </form>
+</section>
+{{end}}

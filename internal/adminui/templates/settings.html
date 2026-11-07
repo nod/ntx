@@ -1,0 +1,24 @@
+{{define "title"}}settings{{end}}
+{{define "content"}}
+<section>
+  <h1>site settings</h1>
+  <form method="POST" action="/admin/settings" class="stack">
+    <label for="name">name</label>
+    <input type="text" id="name" name="name" value="{{with .Site}}{{.Name}}{{end}}">
+    <label for="description">description</label>
+    <input type="text" id="description" name="description" value="{{with .Site}}{{.Description}}{{end}}">
+    <label for="about_slug">about slug</label>
+    <input type="text" id="about_slug" name="about_slug" value="{{with .Site}}{{.AboutSlug}}{{end}}">
+    <p class="hint"><code>/about</code> redirects to <code>/blog/&lt;about slug&gt;</code>.</p>
+    <label for="sections">sections (JSON)</label>
+    <textarea id="sections" name="sections" rows="16" spellcheck="false" class="mono">{{.SectionsJSON}}</textarea>
+    <p class="hint">
+      A list of <code>{"slug", "title", "vars", "pages": [{"slug", "title", "vars"}]}</code>.
+      Each page is served at <code>/&lt;section&gt;/&lt;page&gt;</code> from the theme's
+      <code>sections/&lt;section&gt;/&lt;page&gt;/index.html</code>; <code>vars</code> is an object
+      passed to that template.
+    </p>
+    <div class="actions"><button type="submit" class="primary">save</button></div>
+  </form>
+</section>
+{{end}}

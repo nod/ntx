@@ -1,0 +1,17 @@
+{{define "title"}}delete site{{end}}
+{{define "content"}}
+<section class="narrow">
+  {{with .Target}}
+  <h1>delete {{.Key}}</h1>
+  <p>This permanently deletes <strong>{{.Hostname}}</strong> with all of its posts, tags, sections, members, invites and sessions. It can't be undone.</p>
+  <form method="POST" action="/admin/platform/sites/{{.Key}}/delete" class="stack">
+    <label for="confirm">type <code>{{.Key}}</code> to confirm</label>
+    <input type="text" id="confirm" name="confirm" autocomplete="off" required>
+    <div class="actions">
+      <button type="submit" class="danger">delete site</button>
+      <a href="/admin/platform/sites/{{.Key}}" class="button">cancel</a>
+    </div>
+  </form>
+  {{end}}
+</section>
+{{end}}

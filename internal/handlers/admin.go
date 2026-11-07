@@ -1,240 +1,182 @@
 package handlers
 
 import (
-	"fmt"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/go-chi/chi/v5"
+
 	"github.com/nod/ntx/internal/auth"
+	"github.com/nod/ntx/internal/clientip"
 	"github.com/nod/ntx/internal/models"
+	"github.com/nod/ntx/internal/sitectx"
 )
 
-type loginLimiter struct {
-	mu       sync.Mutex
-	attempts map[string][]time.Time
-}
-
-func newLoginLimiter() *loginLimiter {
-	return &loginLimiter{attempts: make(map[string][]time.Time)}
-}
-
-// allow returns true if key is under the threshold (5 attempts per 15
-// minutes). Site passwords are limited under "<siteID>:<ip>" so one site's
-// brute-force lockout doesn't collaterally lock out another site; the global
-// admin password, which every site's form accepts, is limited under
-// "global:<ip>" so its guesses share one budget across all sites.
-func (l *loginLimiter) allow(key string) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	cutoff := time.Now().Add(-15 * time.Minute)
-	var recent []time.Time
-	for _, t := range l.attempts[key] {
-		if t.After(cutoff) {
-			recent = append(recent, t)
-		}
+// landing is where a successful sign-in goes: the site's posts on a site
+// host, the platform views on the platform host.
+func landing(r *http.Request) string {
+	if sitectx.From(r) != nil {
+		return "/admin/posts"
 	}
-	if len(recent) == 0 {
-		delete(l.attempts, key)
-	} else {
-		l.attempts[key] = recent
-	}
-	if len(recent) >= 5 {
-		return false
-	}
-	l.attempts[key] = append(l.attempts[key], time.Now())
-	return true
+	return "/admin/platform/sites"
 }
 
-func (h *Handler) AdminLogin(w http.ResponseWriter, r *http.Request) {
-	h.serve(w, r, h.adminLogin)
-}
-
-func (h *Handler) adminLogin(w http.ResponseWriter, r *http.Request, sh *siteHandler) {
-	h.render(w, sh, "admin/login.html", nil)
-}
-
-func (h *Handler) AdminLoginPost(w http.ResponseWriter, r *http.Request) {
-	h.serve(w, r, h.adminLoginPost)
-}
-
-func (h *Handler) adminLoginPost(w http.ResponseWriter, r *http.Request, sh *siteHandler) {
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	limitKey := fmt.Sprintf("%d:%s", sh.site.ID, ip)
-	if !h.limiter.allow(limitKey) {
-		h.render(w, sh, "admin/login.html", map[string]interface{}{
-			"Error": "Too many attempts. Try again later.",
-		})
+func (h *Handler) LoginForm(w http.ResponseWriter, r *http.Request) {
+	if auth.ActorFrom(r) != nil {
+		http.Redirect(w, r, landing(r), http.StatusSeeOther)
 		return
 	}
-
-	password := r.FormValue("password")
-	if auth.CheckPassword(sh.site.AdminPasswordHash, password) == nil {
-		h.session.SetSiteSession(w, sh.site.ID)
-		http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
-		return
-	}
-	if h.globalAdminHash != "" {
-		// The site budget alone would give one IP 5 guesses per site at
-		// the global password; charge them to a single shared budget.
-		if !h.limiter.allow("global:" + ip) {
-			h.render(w, sh, "admin/login.html", map[string]interface{}{
-				"Error": "Too many attempts. Try again later.",
-			})
-			return
-		}
-		if auth.CheckPassword(h.globalAdminHash, password) == nil {
-			h.session.SetGlobalSession(w)
-			http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
-			return
-		}
-	}
-	h.render(w, sh, "admin/login.html", map[string]interface{}{
-		"Error": "Invalid password.",
-	})
+	h.admin(w, r, "login", nil)
 }
 
-func (h *Handler) AdminLogout(w http.ResponseWriter, r *http.Request) {
-	h.session.ClearSession(w)
+// LoginPost signs root in. Only failures count against the client IP's
+// budget, so a correct password is never refused because of someone else's
+// guesses (the IP is the real client's; see clientip).
+func (h *Handler) LoginPost(w http.ResponseWriter, r *http.Request) {
+	ip := clientip.IP(r)
+	// Reserve counts the attempt as a failure before the password check,
+	// so parallel guesses can't all get past the budget; a success gives
+	// it back.
+	if !h.d.Limiter.Reserve(ip) {
+		h.admin(w, r, "login", map[string]any{"Error": "Too many attempts. Try again later."})
+		return
+	}
+	if r.FormValue("username") != "root" || auth.CheckPassword(h.d.RootPasswordHash, r.FormValue("password")) != nil {
+		h.admin(w, r, "login", map[string]any{"Error": "Invalid username or password."})
+		return
+	}
+	h.d.Limiter.Release(ip)
+	root, err := h.d.Users.EnsureRoot()
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
+	var siteID *int64
+	if site := sitectx.From(r); site != nil {
+		siteID = &site.ID
+	}
+	if err := h.d.Auth.Login(w, root, siteID); err != nil {
+		h.serverError(w, err)
+		return
+	}
+	http.Redirect(w, r, landing(r), http.StatusSeeOther)
+}
+
+func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
+	if err := h.d.Auth.Logout(w, r); err != nil {
+		h.serverError(w, err)
+		return
+	}
 	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 }
 
-func (h *Handler) AdminPosts(w http.ResponseWriter, r *http.Request) {
-	h.serve(w, r, h.adminPosts)
-}
-
-func (h *Handler) adminPosts(w http.ResponseWriter, r *http.Request, sh *siteHandler) {
-	posts, err := sh.posts.List(false)
-	if err != nil {
-		h.serverError(w, err)
-		return
-	}
-	total, published, drafts, tagCount, err := sh.posts.Stats()
-	if err != nil {
-		h.serverError(w, err)
-		return
-	}
-	h.render(w, sh, "admin/posts.html", map[string]interface{}{
-		"Posts":     posts,
-		"Total":     total,
-		"Published": published,
-		"Drafts":    drafts,
-		"TagCount":  tagCount,
-	})
-}
-
-func (h *Handler) AdminNewPost(w http.ResponseWriter, r *http.Request) {
-	h.serve(w, r, h.adminNewPost)
-}
-
-func (h *Handler) adminNewPost(w http.ResponseWriter, r *http.Request, sh *siteHandler) {
-	h.render(w, sh, "admin/editor.html", map[string]interface{}{
-		"Post": nil,
-	})
-}
-
-func (h *Handler) AdminCreatePost(w http.ResponseWriter, r *http.Request) {
-	h.serve(w, r, h.adminCreatePost)
-}
-
-func (h *Handler) adminCreatePost(w http.ResponseWriter, r *http.Request, sh *siteHandler) {
-	post := postFromForm(r)
-	post.Published = r.FormValue("action") == "publish"
-
-	if err := sh.posts.Create(post); err != nil {
-		h.render(w, sh, "admin/editor.html", map[string]interface{}{
-			"Post":  post,
-			"Error": err.Error(),
-		})
-		return
-	}
-	http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
-}
-
-func (h *Handler) AdminEditPost(w http.ResponseWriter, r *http.Request) {
-	h.serve(w, r, h.adminEditPost)
-}
-
-func (h *Handler) adminEditPost(w http.ResponseWriter, r *http.Request, sh *siteHandler) {
-	post, err := h.getPostFromParam(w, r, sh)
-	if err != nil || post == nil {
-		return
-	}
-	h.render(w, sh, "admin/editor.html", map[string]interface{}{
-		"Post": post,
-	})
-}
-
-func (h *Handler) AdminUpdatePost(w http.ResponseWriter, r *http.Request) {
-	h.serve(w, r, h.adminUpdatePost)
-}
-
-func (h *Handler) adminUpdatePost(w http.ResponseWriter, r *http.Request, sh *siteHandler) {
-	existing, err := h.getPostFromParam(w, r, sh)
-	if err != nil || existing == nil {
-		return
-	}
-
-	action := r.FormValue("action")
-
-	if action == "delete" {
-		if err := sh.posts.Delete(existing.ID); err != nil {
+func (h *Handler) Posts(w http.ResponseWriter, r *http.Request) {
+	h.serve(w, r, func(w http.ResponseWriter, r *http.Request, site *models.Site) {
+		ps := h.posts(site)
+		posts, err := ps.List(false)
+		if err != nil {
 			h.serverError(w, err)
 			return
 		}
-		http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
-		return
-	}
-
-	updated := postFromForm(r)
-	updated.ID = existing.ID
-	switch action {
-	case "publish":
-		updated.Published = true
-	case "unpublish":
-		updated.Published = false
-	default: // "save" preserves current state
-		updated.Published = existing.Published
-	}
-
-	if err := sh.posts.Update(updated); err != nil {
-		h.render(w, sh, "admin/editor.html", map[string]interface{}{
-			"Post":  updated,
-			"Error": err.Error(),
+		total, published, drafts, tagCount, err := ps.Stats()
+		if err != nil {
+			h.serverError(w, err)
+			return
+		}
+		h.admin(w, r, "posts", map[string]any{
+			"Posts": posts, "Total": total, "Published": published, "Drafts": drafts, "TagCount": tagCount,
 		})
-		return
-	}
-	http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
+	})
 }
 
-func (h *Handler) getPostFromParam(w http.ResponseWriter, r *http.Request, sh *siteHandler) (*models.Post, error) {
-	idStr := chi.URLParam(r, "id")
-	id, err := strconv.ParseInt(idStr, 10, 64)
+func (h *Handler) NewPost(w http.ResponseWriter, r *http.Request) {
+	h.serve(w, r, func(w http.ResponseWriter, r *http.Request, site *models.Site) {
+		h.admin(w, r, "editor", map[string]any{"Post": nil})
+	})
+}
+
+func (h *Handler) CreatePost(w http.ResponseWriter, r *http.Request) {
+	h.serve(w, r, func(w http.ResponseWriter, r *http.Request, site *models.Site) {
+		post := postFromForm(r)
+		post.Published = r.FormValue("action") == "publish"
+		if err := h.posts(site).Create(post); err != nil {
+			h.admin(w, r, "editor", map[string]any{"Post": post, "Error": err.Error()})
+			return
+		}
+		http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
+	})
+}
+
+func (h *Handler) EditPost(w http.ResponseWriter, r *http.Request) {
+	h.serve(w, r, func(w http.ResponseWriter, r *http.Request, site *models.Site) {
+		post, ok := h.postFromParam(w, r, site)
+		if !ok {
+			return
+		}
+		h.admin(w, r, "editor", map[string]any{"Post": post})
+	})
+}
+
+func (h *Handler) UpdatePost(w http.ResponseWriter, r *http.Request) {
+	h.serve(w, r, func(w http.ResponseWriter, r *http.Request, site *models.Site) {
+		existing, ok := h.postFromParam(w, r, site)
+		if !ok {
+			return
+		}
+		ps := h.posts(site)
+		action := r.FormValue("action")
+		if action == "delete" {
+			if err := ps.Delete(existing.ID); err != nil {
+				h.serverError(w, err)
+				return
+			}
+			http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
+			return
+		}
+
+		updated := postFromForm(r)
+		updated.ID = existing.ID
+		switch action {
+		case "publish":
+			updated.Published = true
+		case "unpublish":
+			updated.Published = false
+		default: // "save" keeps the current state
+			updated.Published = existing.Published
+		}
+		if err := ps.Update(updated); err != nil {
+			h.admin(w, r, "editor", map[string]any{"Post": updated, "Error": err.Error()})
+			return
+		}
+		http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
+	})
+}
+
+// postFromParam loads the {id} post from site, writing a 404 or 500 and
+// returning ok=false if it can't.
+func (h *Handler) postFromParam(w http.ResponseWriter, r *http.Request, site *models.Site) (*models.Post, bool) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		h.notFound(w)
-		return nil, err
+		return nil, false
 	}
-	post, err := sh.posts.GetByID(id)
+	post, err := h.posts(site).GetByID(id)
 	if err != nil {
 		h.serverError(w, err)
-		return nil, err
+		return nil, false
 	}
 	if post == nil {
 		h.notFound(w)
+		return nil, false
 	}
-	return post, nil
+	return post, true
 }
 
 func postFromForm(r *http.Request) *models.Post {
-	tagsRaw := r.FormValue("tags")
 	var tags []string
-	for _, t := range strings.Split(tagsRaw, ",") {
-		t = strings.TrimSpace(t)
-		if t != "" {
+	for _, t := range strings.Split(r.FormValue("tags"), ",") {
+		if t = strings.TrimSpace(t); t != "" {
 			tags = append(tags, t)
 		}
 	}

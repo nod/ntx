@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"strings"
@@ -34,8 +35,22 @@ func Open(dsn string) (*gorm.DB, error) {
 	}
 }
 
+// ErrLegacySchema means the database was created by an ntx release that
+// predates the 100_initial schema. There is no upgrade path.
+var ErrLegacySchema = errors.New("legacy database schema")
+
+// legacyCutoff is the first goose version of the current schema. Any lower
+// version recorded in goose_db_version belongs to the retired 001-003 chain.
+const legacyCutoff = 100
+
 func openSQLite(path string) (*gorm.DB, error) {
-	db, err := gorm.Open(glebsqlite.Open(path), &gorm.Config{Logger: silentLogger})
+	// Foreign keys are enabled through the DSN so every connection the pool
+	// opens gets them -- a one-off PRAGMA only covers the connection it ran on.
+	dsn := path + "?_pragma=foreign_keys(1)"
+	if path == ":memory:" {
+		dsn = "file::memory:?_pragma=foreign_keys(1)"
+	}
+	db, err := gorm.Open(glebsqlite.Open(dsn), &gorm.Config{Logger: silentLogger})
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite: %w", err)
 	}
@@ -44,15 +59,15 @@ func openSQLite(path string) (*gorm.DB, error) {
 		return nil, err
 	}
 	sqlDB.SetMaxOpenConns(1)
-	if err := db.Exec("PRAGMA foreign_keys = ON").Error; err != nil {
-		sqlDB.Close()
-		return nil, err
-	}
 	if path != ":memory:" {
 		if err := db.Exec("PRAGMA journal_mode = WAL").Error; err != nil {
 			sqlDB.Close()
 			return nil, err
 		}
+	}
+	if err := refuseLegacy(sqlDB, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'goose_db_version'"); err != nil {
+		sqlDB.Close()
+		return nil, err
 	}
 	sub, err := fs.Sub(sqliteMigrations, "migrations/sqlite")
 	if err != nil {
@@ -66,6 +81,27 @@ func openSQLite(path string) (*gorm.DB, error) {
 	return db, nil
 }
 
+// refuseLegacy returns ErrLegacySchema if goose has recorded any version
+// below legacyCutoff. tableExistsQuery counts goose's version table, so a
+// fresh database (no table yet) passes.
+func refuseLegacy(sqlDB *sql.DB, tableExistsQuery string) error {
+	var n int
+	if err := sqlDB.QueryRow(tableExistsQuery).Scan(&n); err != nil {
+		return fmt.Errorf("checking schema version: %w", err)
+	}
+	if n == 0 {
+		return nil
+	}
+	var old int
+	if err := sqlDB.QueryRow("SELECT COUNT(*) FROM goose_db_version WHERE version_id > 0 AND version_id < $1", legacyCutoff).Scan(&old); err != nil {
+		return fmt.Errorf("checking schema version: %w", err)
+	}
+	if old > 0 {
+		return fmt.Errorf("%w: this database predates ntx's web-managed sites and cannot be upgraded; delete it (and any -wal/-shm files) and start again", ErrLegacySchema)
+	}
+	return nil
+}
+
 func openPostgres(dsn string) (*gorm.DB, error) {
 	db, err := gorm.Open(gormpostgres.Open(dsn), &gorm.Config{Logger: silentLogger})
 	if err != nil {
@@ -73,6 +109,10 @@ func openPostgres(dsn string) (*gorm.DB, error) {
 	}
 	sqlDB, err := db.DB()
 	if err != nil {
+		return nil, err
+	}
+	if err := refuseLegacy(sqlDB, "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'goose_db_version'"); err != nil {
+		sqlDB.Close()
 		return nil, err
 	}
 	sub, err := fs.Sub(postgresMigrations, "migrations/postgres")

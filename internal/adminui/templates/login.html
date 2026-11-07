@@ -1,0 +1,13 @@
+{{define "title"}}sign in{{end}}
+{{define "content"}}
+<section class="narrow">
+  <h1>sign in</h1>
+  <form method="POST" action="/admin/login" class="stack">
+    <label for="username">username</label>
+    <input type="text" id="username" name="username" value="root" autocomplete="username" required>
+    <label for="password">password</label>
+    <input type="password" id="password" name="password" autocomplete="current-password" autofocus required>
+    <button type="submit" class="primary">sign in</button>
+  </form>
+</section>
+{{end}}

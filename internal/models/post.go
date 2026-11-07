@@ -20,8 +20,11 @@ type Post struct {
 	Body      string
 	Published bool
 	Tags      []string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	// FirstPublishedAt is set the first time the post is published and
+	// never cleared: it is what "has ever been live" means.
+	FirstPublishedAt *time.Time
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 // dbPost is the internal GORM model. TableName ensures GORM uses "posts".
@@ -33,8 +36,11 @@ type dbPost struct {
 	Body      string  `gorm:"not null"`
 	Published bool    `gorm:"default:false"`
 	Tags      []dbTag `gorm:"many2many:post_tags;joinForeignKey:post_id;joinReferences:tag_id"`
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	AuthorID  *int64
+	// FirstPublishedAt is written only through SQL (see Create and Update).
+	FirstPublishedAt *time.Time
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 func (dbPost) TableName() string { return "posts" }
@@ -146,10 +152,15 @@ func (s *PostStore) Create(p *Post) error {
 		Published: p.Published,
 		Tags:      tags,
 	}
+	if p.Published {
+		now := time.Now()
+		r.FirstPublishedAt = &now
+	}
 	if err := s.db.Create(&r).Error; err != nil {
 		return err
 	}
 	p.ID = int64(r.ID)
+	p.FirstPublishedAt = r.FirstPublishedAt
 	p.CreatedAt = r.CreatedAt
 	p.UpdatedAt = r.UpdatedAt
 	return nil
@@ -165,12 +176,17 @@ func (s *PostStore) Update(p *Post) error {
 	}
 	r := dbPost{ID: uint(p.ID)}
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		res := tx.Model(&r).Where("site_id = ?", s.siteID).Updates(map[string]any{
+		fields := map[string]any{
 			"slug":      p.Slug,
 			"title":     p.Title,
 			"body":      p.Body,
 			"published": p.Published,
-		})
+		}
+		if p.Published {
+			// Set once, on the first publish; later publishes keep it.
+			fields["first_published_at"] = gorm.Expr("COALESCE(first_published_at, ?)", time.Now())
+		}
+		res := tx.Model(&r).Where("site_id = ?", s.siteID).Updates(fields)
 		if res.Error != nil {
 			return res.Error
 		}
@@ -194,14 +210,20 @@ func (s *PostStore) Delete(id int64) error {
 	return nil
 }
 
+// AllTags lists the site's tags that are attached to at least one published
+// post. It feeds public pages, so a draft's tags must never appear here;
+// admin views count every tag through Stats.
 func (s *PostStore) AllTags() ([]string, error) {
-	var tags []dbTag
-	if err := s.db.Where("site_id = ?", s.siteID).Order("name").Find(&tags).Error; err != nil {
+	var names []string
+	err := s.db.Model(&dbTag{}).
+		Distinct("tags.name").
+		Joins("JOIN post_tags ON post_tags.tag_id = tags.id").
+		Joins("JOIN posts ON posts.id = post_tags.post_id AND posts.published = ?", true).
+		Where("tags.site_id = ? AND posts.site_id = ?", s.siteID, s.siteID).
+		Order("tags.name").
+		Pluck("tags.name", &names).Error
+	if err != nil {
 		return nil, err
-	}
-	names := make([]string, len(tags))
-	for i, t := range tags {
-		names[i] = t.Name
 	}
 	return names, nil
 }
@@ -259,6 +281,8 @@ func toPost(r dbPost) Post {
 		Published: r.Published,
 		CreatedAt: r.CreatedAt,
 		UpdatedAt: r.UpdatedAt,
+
+		FirstPublishedAt: r.FirstPublishedAt,
 	}
 	for _, t := range r.Tags {
 		p.Tags = append(p.Tags, t.Name)

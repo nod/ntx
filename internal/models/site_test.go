@@ -1,17 +1,15 @@
 package models
 
 import (
-	"bytes"
-	"log"
-	"os"
-	"strings"
+	"errors"
 	"testing"
 
 	"gorm.io/gorm"
 
-	"github.com/nod/ntx/internal/config"
 	"github.com/nod/ntx/internal/db"
 )
+
+const testPlatformHost = "admin.example.com"
 
 func newTestSiteDB(t *testing.T) *gorm.DB {
 	t.Helper()
@@ -26,187 +24,200 @@ func newTestSiteDB(t *testing.T) *gorm.DB {
 	return database
 }
 
-// captureLog redirects the standard logger into a buffer for the rest of
-// the test, so warnings can be asserted on.
-func captureLog(t *testing.T) *bytes.Buffer {
+func mustCreateSite(t *testing.T, s *SiteStore, key, host string) *Site {
 	t.Helper()
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-	return &buf
+	site := &Site{Key: key, Hostname: host, Theme: "default"}
+	if err := s.Create(site, testPlatformHost); err != nil {
+		t.Fatalf("create site %q: %v", key, err)
+	}
+	return site
 }
 
-func TestEnsureSitesAssignsIDs(t *testing.T) {
-	database := newTestSiteDB(t)
-
-	sites := []config.Site{
-		{Key: "a", SiteURL: "a.example.com"},
-		{Key: "b", SiteURL: "b.example.com"},
-	}
-	if err := EnsureSites(database, sites); err != nil {
-		t.Fatal(err)
-	}
-	if sites[0].ID == 0 || sites[1].ID == 0 {
-		t.Fatalf("expected non-zero IDs, got %+v", sites)
-	}
-	if sites[0].ID == sites[1].ID {
-		t.Fatal("expected distinct IDs")
-	}
+func isValidation(err error) bool {
+	var v *ValidationError
+	return errors.As(err, &v)
 }
 
-func TestEnsureSitesReconcilesHostname(t *testing.T) {
-	database := newTestSiteDB(t)
-
-	first := []config.Site{{Key: "default", SiteURL: "old-host.example.com"}}
-	if err := EnsureSites(database, first); err != nil {
+func countRows(t *testing.T, d *gorm.DB, table string) int64 {
+	t.Helper()
+	var n int64
+	if err := d.Raw("SELECT COUNT(*) FROM " + table).Scan(&n).Error; err != nil {
 		t.Fatal(err)
 	}
-	firstID := first[0].ID
+	return n
+}
 
-	second := []config.Site{{Key: "default", SiteURL: "new-host.example.com"}}
-	if err := EnsureSites(database, second); err != nil {
+func TestCreateAndList(t *testing.T) {
+	d := newTestSiteDB(t)
+	s := NewSiteStore(d)
+	b := mustCreateSite(t, s, "b", "B.Example.com")
+	mustCreateSite(t, s, "a", "a.example.com")
+
+	sites, err := s.List()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if second[0].ID != firstID {
-		t.Errorf("expected same ID across reconciliation, got %d then %d", firstID, second[0].ID)
+	if len(sites) != 2 || sites[0].Key != "a" || sites[1].Key != "b" {
+		t.Fatalf("expected sites ordered a, b; got %+v", sites)
 	}
-
-	var r dbSite
-	if err := database.Where("key = ?", "default").First(&r).Error; err != nil {
-		t.Fatal(err)
+	if b.ID == 0 {
+		t.Error("Create must set the ID")
 	}
-	if r.Hostname != "new-host.example.com" {
-		t.Errorf("hostname not reconciled: got %q", r.Hostname)
+	got := sites[1]
+	if got.Hostname != "b.example.com" {
+		t.Errorf("hostname should be stored lowercase, got %q", got.Hostname)
+	}
+	if got.AboutSlug != "about" || got.Name != "b" {
+		t.Errorf("expected defaults about_slug=about, name=key; got %q, %q", got.AboutSlug, got.Name)
 	}
 }
 
-// TestEnsureSitesWarnsAboutOrphanedContent covers the single-site upgrade
-// trap: migration 002 backfills all pre-existing posts and tags onto a
-// placeholder site with key = "default", and gen-config hands the operator
-// key = "mysite". With the wrong key they get a new site row, an empty blog,
-// and no error anywhere -- so EnsureSites must at least say so out loud.
-func TestEnsureSitesWarnsAboutOrphanedContent(t *testing.T) {
-	database := newTestSiteDB(t)
+func TestCreateValidates(t *testing.T) {
+	d := newTestSiteDB(t)
+	s := NewSiteStore(d)
+	mustCreateSite(t, s, "a", "a.example.com")
 
-	// The "default" row is created by migration 002; give it content, the way
-	// an upgrade from a single-site install would.
-	store := NewPostStore(database).ForSite(1)
-	if err := store.Create(&Post{Slug: "legacy-post", Title: "Legacy", Body: ".", Tags: []string{"legacy"}}); err != nil {
-		t.Fatal(err)
+	for name, site := range map[string]*Site{
+		"bad key":            {Key: "../x", Hostname: "x.example.com", Theme: "default"},
+		"bad hostname":       {Key: "x", Hostname: "https://x.com", Theme: "default"},
+		"platform hostname":  {Key: "x", Hostname: "Admin.Example.com", Theme: "default"},
+		"duplicate key":      {Key: "a", Hostname: "other.example.com", Theme: "default"},
+		"duplicate hostname": {Key: "x", Hostname: "A.example.com", Theme: "default"},
+		"bad theme":          {Key: "x", Hostname: "x.example.com", Theme: "../t"},
+	} {
+		if err := s.Create(site, testPlatformHost); !isValidation(err) {
+			t.Errorf("%s: expected *ValidationError, got %v", name, err)
+		}
 	}
-
-	buf := captureLog(t)
-
-	sites := []config.Site{{Key: "mysite", SiteURL: "mysite.example.com"}}
-	if err := EnsureSites(database, sites); err != nil {
-		t.Fatal(err)
-	}
-
-	out := buf.String()
-	if !strings.Contains(out, `site "default"`) {
-		t.Errorf("warning should name the orphaned site key, got: %q", out)
-	}
-	if !strings.Contains(out, "1 posts / 1 tags") {
-		t.Errorf("warning should report the orphaned row counts, got: %q", out)
-	}
-	if !strings.Contains(out, `key = "default"`) {
-		t.Errorf("warning should tell the operator which key to set, got: %q", out)
+	if n := countRows(t, d, "sites"); n != 1 {
+		t.Errorf("rejected creates must insert nothing; %d sites", n)
 	}
 }
 
-// TestEnsureSitesQuietAboutEmptyRemovedSite is the control for the test
-// above: deliberately removing an empty site from the config is legitimate
-// and must not produce noise.
-func TestEnsureSitesQuietAboutEmptyRemovedSite(t *testing.T) {
-	database := newTestSiteDB(t)
+func TestUpdateRejectsHostnameConflicts(t *testing.T) {
+	d := newTestSiteDB(t)
+	s := NewSiteStore(d)
+	a := mustCreateSite(t, s, "a", "a.example.com")
+	mustCreateSite(t, s, "b", "b.example.com")
 
-	buf := captureLog(t)
-
-	sites := []config.Site{{Key: "mysite", SiteURL: "mysite.example.com"}}
-	if err := EnsureSites(database, sites); err != nil {
-		t.Fatal(err)
+	for _, host := range []string{"b.example.com", "B.EXAMPLE.COM", testPlatformHost} {
+		edit := *a
+		edit.Hostname = host
+		if err := s.Update(&edit, testPlatformHost); !isValidation(err) {
+			t.Errorf("hostname %q: expected *ValidationError, got %v", host, err)
+		}
 	}
-
-	if out := buf.String(); out != "" {
-		t.Errorf("expected no warning for an orphaned site with no content, got: %q", out)
+	sites, _ := s.List()
+	if sites[0].Hostname != "a.example.com" {
+		t.Errorf("rejected update must not change the hostname, got %q", sites[0].Hostname)
 	}
 }
 
-// TestEnsureSitesSurvivesKeyRename and the swap test below guard the bug
-// migration 003 fixes: sites.hostname used to be NOT NULL UNIQUE, so
-// renaming a site's key while keeping its site_url -- or swapping site_url
-// between two sites -- aborted startup with an opaque "UNIQUE constraint
-// failed: sites.hostname". site_url uniqueness is validated in config.Load,
-// which is the enforcement point that gives a clear error.
-func TestEnsureSitesSurvivesKeyRename(t *testing.T) {
-	database := newTestSiteDB(t)
-
-	before := []config.Site{{Key: "old-key", SiteURL: "mysite.example.com"}}
-	if err := EnsureSites(database, before); err != nil {
+func TestUpdateKeepsKey(t *testing.T) {
+	d := newTestSiteDB(t)
+	s := NewSiteStore(d)
+	a := mustCreateSite(t, s, "a", "a.example.com")
+	edit := *a
+	edit.Key = "renamed"
+	edit.Name = "New Name"
+	if err := s.Update(&edit, testPlatformHost); err != nil {
 		t.Fatal(err)
 	}
-
-	after := []config.Site{{Key: "new-key", SiteURL: "mysite.example.com"}}
-	if err := EnsureSites(database, after); err != nil {
-		t.Fatalf("renaming a site's key while keeping its site_url should succeed, got: %v", err)
-	}
-	if after[0].ID == 0 {
-		t.Error("expected the renamed site to get a database id")
-	}
-	if after[0].ID == before[0].ID {
-		t.Error("a new key is a new site row, so it should get a new id")
+	sites, _ := s.List()
+	if sites[0].Key != "a" || sites[0].Name != "New Name" {
+		t.Errorf("key must be immutable while other fields update; got key %q name %q", sites[0].Key, sites[0].Name)
 	}
 }
 
-func TestEnsureSitesSurvivesURLSwap(t *testing.T) {
-	database := newTestSiteDB(t)
-
-	before := []config.Site{
-		{Key: "a", SiteURL: "a.example.com"},
-		{Key: "b", SiteURL: "b.example.com"},
-	}
-	if err := EnsureSites(database, before); err != nil {
+func TestHostnameChangeDeletesSessions(t *testing.T) {
+	d := newTestSiteDB(t)
+	s := NewSiteStore(d)
+	a := mustCreateSite(t, s, "a", "a.example.com")
+	if err := d.Exec("INSERT INTO users (id, name, is_root, is_platform_admin, created_at) VALUES (1, 'root', 1, 0, CURRENT_TIMESTAMP)").Error; err != nil {
 		t.Fatal(err)
 	}
+	addSession := func() {
+		t.Helper()
+		if err := d.Exec("INSERT INTO sessions (token_hash, user_id, site_id, created_at, expires_at, last_seen_at) VALUES (?, 1, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", "h"+a.Name, a.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	addSession()
 
-	swapped := []config.Site{
-		{Key: "a", SiteURL: "b.example.com"},
-		{Key: "b", SiteURL: "a.example.com"},
-	}
-	if err := EnsureSites(database, swapped); err != nil {
-		t.Fatalf("swapping site_url between two sites should succeed, got: %v", err)
-	}
-	if swapped[0].ID != before[0].ID || swapped[1].ID != before[1].ID {
-		t.Errorf("ids should follow the key, not the url: got %d/%d, want %d/%d",
-			swapped[0].ID, swapped[1].ID, before[0].ID, before[1].ID)
-	}
-
-	var rows []dbSite
-	if err := database.Order("key").Find(&rows).Error; err != nil {
+	same := *a
+	same.Name = "Renamed"
+	if err := s.Update(&same, testPlatformHost); err != nil {
 		t.Fatal(err)
 	}
-	hostnames := map[string]string{}
-	for _, r := range rows {
-		hostnames[r.Key] = r.Hostname
+	if n := countRows(t, d, "sessions"); n != 1 {
+		t.Errorf("an update that keeps the hostname must keep sessions; %d left", n)
 	}
-	if hostnames["a"] != "b.example.com" || hostnames["b"] != "a.example.com" {
-		t.Errorf("hostnames not reconciled after swap: %v", hostnames)
+
+	moved := same
+	moved.Hostname = "new.example.com"
+	if err := s.Update(&moved, testPlatformHost); err != nil {
+		t.Fatal(err)
+	}
+	if n := countRows(t, d, "sessions"); n != 0 {
+		t.Errorf("changing the hostname must delete the site's sessions; %d left", n)
 	}
 }
 
-// TestSiteModelDoesNotReintroduceHostnameUnique: migration 003 dropped
-// UNIQUE(sites.hostname) because it broke key renames and site_url swaps
-// at boot. The GORM model must agree, or anyone running AutoMigrate (tests,
-// tooling) quietly puts the constraint back.
-func TestSiteModelDoesNotReintroduceHostnameUnique(t *testing.T) {
-	database := newTestSiteDB(t)
-	if err := database.AutoMigrate(&dbSite{}); err != nil {
-		t.Fatalf("AutoMigrate: %v", err)
-	}
-	if err := database.Create(&dbSite{Key: "one", Hostname: "same.example.com"}).Error; err != nil {
+func TestSetSectionsValidatesAndReplaces(t *testing.T) {
+	d := newTestSiteDB(t)
+	s := NewSiteStore(d)
+	a := mustCreateSite(t, s, "a", "a.example.com")
+
+	orig := []Section{{Slug: "projects", Title: "Projects", Pages: []SectionPage{{Slug: "one", Title: "One"}}}}
+	if err := s.SetSections(a.ID, orig); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.Create(&dbSite{Key: "two", Hostname: "same.example.com"}).Error; err != nil {
-		t.Errorf("two site rows sharing a hostname must be allowed after AutoMigrate: %v", err)
+
+	for name, secs := range map[string][]Section{
+		"reserved slug":  {{Slug: "blog"}},
+		"bad page slug":  {{Slug: "x", Pages: []SectionPage{{Slug: "../x"}}}},
+		"duplicate slug": {{Slug: "x"}, {Slug: "x"}},
+		"dup page slug":  {{Slug: "x", Pages: []SectionPage{{Slug: "p"}, {Slug: "p"}}}},
+	} {
+		if err := s.SetSections(a.ID, secs); !isValidation(err) {
+			t.Errorf("%s: expected *ValidationError, got %v", name, err)
+		}
+	}
+	sites, _ := s.List()
+	if len(sites[0].Sections) != 1 || sites[0].Sections[0].Slug != "projects" {
+		t.Fatalf("rejected sections must leave the old ones intact, got %+v", sites[0].Sections)
+	}
+
+	next := []Section{
+		{Slug: "writing", Title: "Writing", Vars: map[string]any{"year": "2026"}, Pages: []SectionPage{
+			{Slug: "b", Title: "B", Vars: map[string]any{"n": float64(2)}},
+			{Slug: "a", Title: "A"},
+		}},
+	}
+	if err := s.SetSections(a.ID, next); err != nil {
+		t.Fatal(err)
+	}
+	sites, _ = s.List()
+	got := sites[0].Sections
+	if len(got) != 1 || got[0].Slug != "writing" || got[0].Vars["year"] != "2026" {
+		t.Fatalf("sections not replaced as expected: %+v", got)
+	}
+	if len(got[0].Pages) != 2 || got[0].Pages[0].Slug != "b" || got[0].Pages[0].Vars["n"] != float64(2) {
+		t.Errorf("pages must keep their given order and vars: %+v", got[0].Pages)
+	}
+}
+
+func TestDeleteCascadesSections(t *testing.T) {
+	d := newTestSiteDB(t)
+	s := NewSiteStore(d)
+	a := mustCreateSite(t, s, "a", "a.example.com")
+	if err := s.SetSections(a.ID, []Section{{Slug: "x", Pages: []SectionPage{{Slug: "p"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete(a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n := countRows(t, d, "sections") + countRows(t, d, "section_pages"); n != 0 {
+		t.Errorf("deleting a site must delete its sections; %d rows left", n)
 	}
 }

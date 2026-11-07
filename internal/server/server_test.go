@@ -1,10 +1,12 @@
 package server
 
 import (
-	"fmt"
+	"bytes"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -14,921 +16,320 @@ import (
 	"github.com/nod/ntx/internal/auth"
 	"github.com/nod/ntx/internal/config"
 	"github.com/nod/ntx/internal/db"
+	"github.com/nod/ntx/internal/handlers"
 	"github.com/nod/ntx/internal/models"
+	"github.com/nod/ntx/internal/sitereg"
 )
 
-// setupServer builds a single-site server whose site_url is "example.com"
-// and returns a client that always sends that Host header, since
-// httptest.Server otherwise sends "127.0.0.1:PORT" (which won't match any
-// configured site_url and would 404 at the resolveSite middleware).
-func setupServer(t *testing.T) (*httptest.Server, *models.PostStore, *http.Client) {
+const platformHost = "admin.example.com"
+
+type env struct {
+	t      *testing.T
+	ts     *httptest.Server
+	themes string
+	posts  *models.PostStore
+	siteA  *models.Site
+	siteB  *models.Site
+}
+
+func writeTheme(t *testing.T, root, name string) {
 	t.Helper()
-	return setupServerWithConfig(t, nil)
-}
-
-func setupServerWithConfig(t *testing.T, extra []config.Section) (*httptest.Server, *models.PostStore, *http.Client) {
-	t.Helper()
-
-	database, err := db.Open("sqlite://:memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		sqlDB, _ := database.DB()
-		sqlDB.Close()
-	})
-
-	tmpDir := t.TempDir()
-	setupTemplates(t, tmpDir)
-	if extra != nil {
-		sectionTmpl := filepath.Join(tmpDir, "sections/projects/one/index.html")
-		os.MkdirAll(filepath.Dir(sectionTmpl), 0755)
-		os.WriteFile(sectionTmpl, []byte(`{{template "base.html" .}}{{define "content"}}project-one{{end}}`), 0644)
-	}
-
-	hash, _ := auth.HashPassword("testpass")
-	sites := []config.Site{
-		{
-			Key:               "mysite",
-			SiteURL:           "example.com",
-			TemplatePath:      tmpDir,
-			StaticPath:        tmpDir,
-			AboutSlug:         "about-page",
-			AdminPasswordHash: hash,
-			Sections:          extra,
-		},
-	}
-	if err := models.EnsureSites(database, sites); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &config.Config{
-		SessionSecret: "testsecretkey12345678901234567890",
-		Dev:           true,
-		Sites:         sites,
-	}
-
-	rawPosts := models.NewPostStore(database)
-	session := auth.NewSessionManager(cfg.SessionSecret, false)
-
-	srv, err := New(cfg, rawPosts, session)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	ts := httptest.NewServer(srv.Handler)
-	t.Cleanup(ts.Close)
-
-	client := &http.Client{
-		Transport: hostRewriteTransport{host: "example.com", inner: http.DefaultTransport, base: ts.URL},
-	}
-	return ts, rawPosts.ForSite(sites[0].ID), client
-}
-
-// hostRewriteTransport sends every request to ts's real address but with
-// a Host header the resolveSite middleware will recognize.
-type hostRewriteTransport struct {
-	host  string
-	inner http.RoundTripper
-	base  string
-}
-
-func (t hostRewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	baseURL, _ := url.Parse(t.base)
-	req = req.Clone(req.Context())
-	req.URL.Scheme = baseURL.Scheme
-	req.URL.Host = baseURL.Host
-	req.Host = t.host
-	return t.inner.RoundTrip(req)
-}
-
-func setupTemplates(t *testing.T, dir string) {
-	t.Helper()
-
-	base := `<!DOCTYPE html><html><body>{{block "content" .}}{{end}}</body></html>`
-	write := func(path, content string) {
-		full := filepath.Join(dir, path)
-		os.MkdirAll(filepath.Dir(full), 0755)
+	for path, content := range map[string]string{
+		"templates/base.html":                        `<!DOCTYPE html><html><body>{{block "content" .}}{{end}}</body></html>`,
+		"templates/home.html":                        `{{template "base.html" .}}{{define "content"}}home of {{.SiteName}}{{end}}`,
+		"templates/blog/index.html":                  `{{template "base.html" .}}{{define "content"}}{{range .Posts}}{{.Title}} {{end}}{{end}}`,
+		"templates/blog/post.html":                   `{{template "base.html" .}}{{define "content"}}{{.Post.Title}}{{end}}`,
+		"templates/sections/projects/one/index.html": `{{template "base.html" .}}{{define "content"}}project {{.Title}}{{end}}`,
+	} {
+		full := filepath.Join(root, name, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(full, []byte(content), 0644); err != nil {
 			t.Fatal(err)
 		}
 	}
-
-	write("base.html", base)
-	write("home.html", `{{template "base.html" .}}{{define "content"}}home{{end}}`)
-	write("blog/index.html", `{{template "base.html" .}}{{define "content"}}blog-index{{end}}`)
-	write("blog/post.html", `{{template "base.html" .}}{{define "content"}}{{.Post.Title}}{{end}}`)
-	write("admin/login.html", `{{template "base.html" .}}{{define "content"}}login{{if .Error}} error:{{.Error}}{{end}}{{end}}`)
-	write("admin/posts.html", `{{template "base.html" .}}{{define "content"}}posts-admin{{end}}`)
-	write("admin/editor.html", `{{template "base.html" .}}{{define "content"}}editor{{end}}`)
 }
 
-// setupTwoSiteServer builds one server for two sites — a.example.com with
-// admin password "passA" and b.example.com with "passB" — and returns it
-// alongside the sites (with their database ids populated) and an unscoped
-// post store. globalAdminHash may be empty for "no global admin configured".
-//
-// Tests here drive it with explicit req.Host instead of the
-// hostRewriteTransport used by the single-site helper, since the whole point
-// is which host a request carries.
-func setupTwoSiteServer(t *testing.T, globalAdminHash string) (*httptest.Server, []config.Site, *models.PostStore) {
+func setup(t *testing.T) *env {
 	t.Helper()
-
-	database, err := db.Open("sqlite://:memory:")
+	d, err := db.Open("sqlite://:memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		sqlDB, _ := database.DB()
-		sqlDB.Close()
-	})
+	t.Cleanup(func() { s, _ := d.DB(); s.Close() })
 
-	tmpDir := t.TempDir()
-	setupTemplates(t, tmpDir)
+	themesRoot := t.TempDir()
+	writeTheme(t, themesRoot, "t1")
 
-	hashA, _ := auth.HashPassword("passA")
-	hashB, _ := auth.HashPassword("passB")
-	sites := []config.Site{
-		{Key: "a", SiteURL: "a.example.com", TemplatePath: tmpDir, StaticPath: tmpDir, AboutSlug: "about", AdminPasswordHash: hashA},
-		{Key: "b", SiteURL: "b.example.com", TemplatePath: tmpDir, StaticPath: tmpDir, AboutSlug: "about", AdminPasswordHash: hashB},
-	}
-	if err := models.EnsureSites(database, sites); err != nil {
+	users := models.NewUserStore(d)
+	if _, err := users.EnsureRoot(); err != nil {
 		t.Fatal(err)
 	}
-
-	cfg := &config.Config{
-		SessionSecret:           "testsecretkey12345678901234567890",
-		Dev:                     true,
-		Sites:                   sites,
-		GlobalAdminPasswordHash: globalAdminHash,
-	}
-	rawPosts := models.NewPostStore(database)
-	session := auth.NewSessionManager(cfg.SessionSecret, false)
-
-	srv, err := New(cfg, rawPosts, session)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ts := httptest.NewServer(srv.Handler)
-	t.Cleanup(ts.Close)
-
-	return ts, sites, rawPosts
-}
-
-// noRedirectClient returns a client that surfaces redirects as responses
-// rather than following them, which is how every auth assertion here reads
-// its result.
-func noRedirectClient() *http.Client {
-	return &http.Client{CheckRedirect: func(r *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
-}
-
-// postLogin submits a password to host's /admin/login and returns the
-// response, leaving the status code and any Set-Cookie to the caller.
-func postLogin(t *testing.T, client *http.Client, baseURL, host, password string) *http.Response {
-	t.Helper()
-	req, _ := http.NewRequest(http.MethodPost, baseURL+"/admin/login",
-		strings.NewReader(url.Values{"password": {password}}.Encode()))
-	req.Host = host
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("login on %s: %v", host, err)
-	}
-	return resp
-}
-
-func sessionCookie(t *testing.T, resp *http.Response) *http.Cookie {
-	t.Helper()
-	for _, c := range resp.Cookies() {
-		if c.Name == "ntx_session" {
-			return c
-		}
-	}
-	t.Fatal("no session cookie in response")
-	return nil
-}
-
-// adminPostsStatus requests the auth-gated /admin/posts on host carrying
-// cookie, and reports the status: 200 means the session was accepted there,
-// 303 means it was rejected and bounced to the login page.
-func adminPostsStatus(t *testing.T, client *http.Client, baseURL, host string, cookie *http.Cookie) int {
-	t.Helper()
-	req, _ := http.NewRequest(http.MethodGet, baseURL+"/admin/posts", nil)
-	req.Host = host
-	req.AddCookie(cookie)
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("GET /admin/posts on %s: %v", host, err)
-	}
-	defer resp.Body.Close()
-	return resp.StatusCode
-}
-
-func setupServerWithSections(t *testing.T) (*httptest.Server, *models.PostStore, *http.Client) {
-	t.Helper()
-	return setupServerWithConfig(t, []config.Section{
-		{
-			Slug:  "projects",
-			Title: "Projects",
-			Pages: []config.SectionPage{
-				{Slug: "one", Title: "Project One"},
-			},
-		},
-	})
-}
-
-func TestHomeRoute(t *testing.T) {
-	_, _, client := setupServer(t)
-	resp, err := client.Get("http://example.com/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
-	}
-}
-
-// TestUnmatchedHostReturns404 guards a spec requirement: an unmatched Host
-// must get a bare 404, which is what stops one tenant's URLs from
-// resolving on another tenant's hostname. It must bypass the
-// hostRewriteTransport (which unconditionally overwrites req.Host to
-// "example.com") to actually exercise the unmatched path. See addendum
-// Ruling 5.
-func TestUnmatchedHostReturns404(t *testing.T) {
-	ts, _, _ := setupServer(t)
-
-	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/", nil)
-	req.Host = "not-configured.example.com"
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("expected 404 for unmatched host, got %d", resp.StatusCode)
-	}
-}
-
-func TestAboutRedirect(t *testing.T) {
-	_, _, baseClient := setupServer(t)
-	client := &http.Client{
-		Transport: baseClient.Transport,
-		CheckRedirect: func(r *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	resp, err := client.Get("http://example.com/about")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusFound {
-		t.Errorf("expected 302, got %d", resp.StatusCode)
-	}
-	if loc := resp.Header.Get("Location"); !strings.Contains(loc, "about-page") {
-		t.Errorf("redirect to wrong location: %s", loc)
-	}
-}
-
-func TestBlogIndex(t *testing.T) {
-	_, _, client := setupServer(t)
-	resp, err := client.Get("http://example.com/blog")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
-	}
-}
-
-func TestBlogPost404(t *testing.T) {
-	_, _, client := setupServer(t)
-	resp, err := client.Get("http://example.com/blog/no-such-post")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", resp.StatusCode)
-	}
-}
-
-func TestBlogPostDraftHidden(t *testing.T) {
-	_, posts, client := setupServer(t)
-
-	p := &models.Post{Slug: "secret-draft", Title: "Secret", Body: ".", Published: false}
-	if err := posts.Create(p); err != nil {
-		t.Fatal(err)
-	}
-
-	resp, err := client.Get("http://example.com/blog/secret-draft")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("draft should return 404, got %d", resp.StatusCode)
-	}
-}
-
-func TestBlogPostPublished(t *testing.T) {
-	_, posts, client := setupServer(t)
-
-	p := &models.Post{Slug: "my-post", Title: "My Post", Body: "# Hello", Published: true}
-	if err := posts.Create(p); err != nil {
-		t.Fatal(err)
-	}
-
-	resp, err := client.Get("http://example.com/blog/my-post")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
-	}
-}
-
-func TestSectionPage(t *testing.T) {
-	_, _, client := setupServerWithSections(t)
-	resp, err := client.Get("http://example.com/projects/one")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
-	}
-}
-
-func TestSectionPageNotInConfig(t *testing.T) {
-	_, _, client := setupServerWithSections(t)
-	resp, err := client.Get("http://example.com/projects/nonexistent")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", resp.StatusCode)
-	}
-}
-
-func TestSectionUnknownNamespace(t *testing.T) {
-	_, _, client := setupServer(t)
-	resp, err := client.Get("http://example.com/projects/one")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("expected 404 for unconfigured section, got %d", resp.StatusCode)
-	}
-}
-
-func TestAdminLoginRequired(t *testing.T) {
-	_, _, baseClient := setupServer(t)
-	client := &http.Client{
-		Transport: baseClient.Transport,
-		CheckRedirect: func(r *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	resp, err := client.Get("http://example.com/admin/posts")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusSeeOther {
-		t.Errorf("expected redirect, got %d", resp.StatusCode)
-	}
-}
-
-func TestAdminLoginFlow(t *testing.T) {
-	_, _, baseClient := setupServer(t)
-	client := &http.Client{
-		Transport: baseClient.Transport,
-		CheckRedirect: func(r *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-
-	resp, err := client.PostForm("http://example.com/admin/login", url.Values{
-		"password": {"testpass"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusSeeOther {
-		t.Errorf("expected redirect after login, got %d", resp.StatusCode)
-	}
-
-	cookie := resp.Cookies()
-	if len(cookie) == 0 {
-		t.Fatal("no session cookie set")
-	}
-
-	req, _ := http.NewRequest(http.MethodGet, "http://example.com/admin/posts", nil)
-	req.AddCookie(cookie[0])
-	resp2, err := client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp2.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 for authenticated request, got %d", resp2.StatusCode)
-	}
-}
-
-func TestAdminLoginBadPassword(t *testing.T) {
-	_, _, client := setupServer(t)
-
-	resp, err := client.PostForm("http://example.com/admin/login", url.Values{
-		"password": {"wrongpass"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 with error form, got %d", resp.StatusCode)
-	}
-}
-
-func loginCookie(t *testing.T, client *http.Client) *http.Cookie {
-	t.Helper()
-	c := &http.Client{
-		Transport: client.Transport,
-		CheckRedirect: func(r *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	resp, err := c.PostForm("http://example.com/admin/login", url.Values{"password": {"testpass"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, c := range resp.Cookies() {
-		if c.Name == "ntx_session" {
-			return c
-		}
-	}
-	t.Fatal("no session cookie after login")
-	return nil
-}
-
-func TestBlogIndexTagFilter(t *testing.T) {
-	_, posts, client := setupServer(t)
-
-	_ = createPost(t, posts, "go-post", "Go Post", true, "go")
-	_ = createPost(t, posts, "rust-post", "Rust Post", true, "rust")
-
-	resp, err := client.Get("http://example.com/blog?tag=go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "blog-index") {
-		t.Error("expected blog index content")
-	}
-}
-
-func TestAdminLogout(t *testing.T) {
-	_, _, client := setupServer(t)
-	cookie := loginCookie(t, client)
-
-	c := &http.Client{
-		Transport: client.Transport,
-		CheckRedirect: func(r *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-
-	req, _ := http.NewRequest(http.MethodPost, "http://example.com/admin/logout", nil)
-	req.AddCookie(cookie)
-	resp, err := c.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusSeeOther {
-		t.Errorf("expected redirect after logout, got %d", resp.StatusCode)
-	}
-
-	for _, c := range resp.Cookies() {
-		if c.Name == "ntx_session" && c.MaxAge < 0 {
-			return
-		}
-	}
-	t.Error("session cookie not cleared after logout")
-}
-
-func TestAllAdminRoutesRequireAuth(t *testing.T) {
-	_, posts, baseClient := setupServer(t)
-	p := createPost(t, posts, "test-auth", "Auth Test", false)
-
-	client := &http.Client{
-		Transport: baseClient.Transport,
-		CheckRedirect: func(r *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-
-	routes := []struct {
-		method string
-		path   string
-	}{
-		{http.MethodGet, "/admin/posts"},
-		{http.MethodGet, "/admin/posts/new"},
-		{http.MethodPost, "/admin/posts"},
-		{http.MethodGet, "/admin/posts/" + itoa(p.ID) + "/edit"},
-		{http.MethodPost, "/admin/posts/" + itoa(p.ID)},
-		{http.MethodPost, "/admin/logout"},
-	}
-
-	for _, rt := range routes {
-		req, _ := http.NewRequest(rt.method, "http://example.com"+rt.path, nil)
-		resp, err := client.Do(req)
-		if err != nil {
-			t.Fatalf("%s %s: %v", rt.method, rt.path, err)
-		}
-		if resp.StatusCode != http.StatusSeeOther {
-			t.Errorf("%s %s: expected 303 redirect, got %d", rt.method, rt.path, resp.StatusCode)
-		}
-	}
-}
-
-func TestAdminCreatePost(t *testing.T) {
-	_, posts, baseClient := setupServer(t)
-	cookie := loginCookie(t, baseClient)
-
-	client := &http.Client{
-		Transport: baseClient.Transport,
-		CheckRedirect: func(r *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-
-	req, _ := http.NewRequest(http.MethodPost, "http://example.com/admin/posts", strings.NewReader(url.Values{
-		"title":  {"New Post"},
-		"slug":   {"new-post"},
-		"body":   {"# Hello"},
-		"tags":   {"go, testing"},
-		"action": {"publish"},
-	}.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(cookie)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusSeeOther {
-		t.Errorf("expected redirect after create, got %d", resp.StatusCode)
-	}
-
-	p, err := posts.GetBySlug("new-post")
-	if err != nil || p == nil {
-		t.Fatal("post not found after create")
-	}
-	if !p.Published {
-		t.Error("post should be published")
-	}
-	if len(p.Tags) != 2 {
-		t.Errorf("expected 2 tags, got %v", p.Tags)
-	}
-}
-
-func TestBlogPostMarkdownXSS(t *testing.T) {
-	_, posts, client := setupServer(t)
-
-	p := &models.Post{
-		Slug:      "xss-test",
-		Title:     "XSS Test",
-		Body:      `safe content\n\n<script>alert('xss')</script>`,
-		Published: true,
-	}
-	if err := posts.Create(p); err != nil {
-		t.Fatal(err)
-	}
-
-	resp, err := client.Get("http://example.com/blog/xss-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	if strings.Contains(string(body), "<script>") {
-		t.Error("raw <script> tag present in rendered output — XSS not stripped")
-	}
-}
-
-// Multi-site: two sites in one server, isolated by Host
-
-func TestTwoSitesIsolatedByHost(t *testing.T) {
-	ts, sites, rawPosts := setupTwoSiteServer(t, "")
-
-	postsA := rawPosts.ForSite(sites[0].ID)
-	postsB := rawPosts.ForSite(sites[1].ID)
-	if err := postsA.Create(&models.Post{Slug: "hello", Title: "Hello from A", Body: ".", Published: true}); err != nil {
-		t.Fatal(err)
-	}
-	if err := postsB.Create(&models.Post{Slug: "hello", Title: "Hello from B", Body: ".", Published: true}); err != nil {
-		t.Fatal(err)
-	}
-
-	get := func(host, path string) string {
-		req, _ := http.NewRequest(http.MethodGet, ts.URL+path, nil)
-		req.Host = host
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
+	sites := models.NewSiteStore(d)
+	a := &models.Site{Key: "a", Hostname: "a.example.com", Name: "Site A", Theme: "t1"}
+	b := &models.Site{Key: "b", Hostname: "b.example.com", Name: "Site B", Theme: "t1"}
+	for _, s := range []*models.Site{a, b} {
+		if err := sites.Create(s, platformHost); err != nil {
 			t.Fatal(err)
 		}
-		body, _ := io.ReadAll(resp.Body)
-		return string(body)
 	}
-
-	bodyA := get("a.example.com", "/blog/hello")
-	if !strings.Contains(bodyA, "Hello from A") {
-		t.Errorf("expected site A's post title, got: %s", bodyA)
-	}
-	bodyB := get("b.example.com", "/blog/hello")
-	if !strings.Contains(bodyB, "Hello from B") {
-		t.Errorf("expected site B's post title, got: %s", bodyB)
-	}
-}
-
-func TestSessionScopedToOneSiteRejectedOnAnother(t *testing.T) {
-	ts, _, _ := setupTwoSiteServer(t, "")
-	client := noRedirectClient()
-
-	cookie := sessionCookie(t, postLogin(t, client, ts.URL, "a.example.com", "passA"))
-
-	if got := adminPostsStatus(t, client, ts.URL, "b.example.com", cookie); got != http.StatusSeeOther {
-		t.Errorf("expected site A's session to be rejected on site B, got %d", got)
-	}
-
-	// Positive control: without this, the test above would also pass if
-	// sessions were rejected everywhere -- including on the site that
-	// issued them.
-	if got := adminPostsStatus(t, client, ts.URL, "a.example.com", cookie); got != http.StatusOK {
-		t.Errorf("expected site A's session to be accepted on site A, got %d", got)
-	}
-}
-
-// TestGlobalAdminSessionAuthenticatesOnEverySite covers the global-admin
-// login flow, which no test touched before: the global hash is the one
-// credential that crosses the tenant boundary by design, and it is where a
-// credential leak was already found.
-func TestGlobalAdminSessionAuthenticatesOnEverySite(t *testing.T) {
-	globalHash, err := auth.HashPassword("globalpass")
+	reg, err := sitereg.New(sites)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts, _, _ := setupTwoSiteServer(t, globalHash)
-	client := noRedirectClient()
-
-	resp := postLogin(t, client, ts.URL, "a.example.com", "globalpass")
-	if resp.StatusCode != http.StatusSeeOther {
-		t.Fatalf("expected the global admin password to log in on site A, got %d", resp.StatusCode)
+	rootHash, _ := auth.HashPassword("rootpass")
+	cfg := &config.Config{
+		Dev:              true,
+		TrustedProxies:   []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")},
+		ThemesPath:       themesRoot,
+		PlatformHostname: platformHost,
+		RootPasswordHash: rootHash,
 	}
-	cookie := sessionCookie(t, resp)
-
-	if got := adminPostsStatus(t, client, ts.URL, "a.example.com", cookie); got != http.StatusOK {
-		t.Errorf("global-admin session rejected on the site it logged in on, got %d", got)
-	}
-	if got := adminPostsStatus(t, client, ts.URL, "b.example.com", cookie); got != http.StatusOK {
-		t.Errorf("global-admin session should be accepted on every site, got %d on site B", got)
-	}
+	am := auth.NewManager(models.NewSessionStore(d), users, rootHash, false)
+	posts := models.NewPostStore(d)
+	h := handlers.New(handlers.Deps{
+		Sites: sites, Posts: posts, Users: users, Registry: reg, Auth: am,
+		Limiter: auth.NewLimiter(), ThemesPath: themesRoot, PlatformHostname: platformHost,
+		RootPasswordHash: rootHash, Dev: true,
+	})
+	ts := httptest.NewServer(New(cfg, h, reg, am).Handler)
+	t.Cleanup(ts.Close)
+	return &env{t: t, ts: ts, themes: themesRoot, posts: posts, siteA: a, siteB: b}
 }
 
-// TestSiteAdminSessionStaysScopedWhenGlobalHashIsSet is the other half of
-// the global-admin flow: configuring a global hash must not promote ordinary
-// per-site logins to all-sites sessions.
-func TestSiteAdminSessionStaysScopedWhenGlobalHashIsSet(t *testing.T) {
-	globalHash, err := auth.HashPassword("globalpass")
+var noRedirect = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+// do sends a request with an explicit Host header, the way a browser
+// addressing that site would, and returns the status and body.
+func (e *env) do(method, host, path string, form url.Values, headers map[string]string, cookie *http.Cookie) (*http.Response, string) {
+	e.t.Helper()
+	var body io.Reader
+	if form != nil {
+		body = strings.NewReader(form.Encode())
+	}
+	req, _ := http.NewRequest(method, e.ts.URL+path, body)
+	req.Host = host
+	if form != nil {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	resp, err := noRedirect.Do(req)
 	if err != nil {
-		t.Fatal(err)
+		e.t.Fatal(err)
 	}
-	ts, _, _ := setupTwoSiteServer(t, globalHash)
-	client := noRedirectClient()
-
-	resp := postLogin(t, client, ts.URL, "a.example.com", "passA")
-	if resp.StatusCode != http.StatusSeeOther {
-		t.Fatalf("expected site A's own password to log in on site A, got %d", resp.StatusCode)
-	}
-	cookie := sessionCookie(t, resp)
-
-	if got := adminPostsStatus(t, client, ts.URL, "a.example.com", cookie); got != http.StatusOK {
-		t.Errorf("site A's session rejected on site A, got %d", got)
-	}
-	if got := adminPostsStatus(t, client, ts.URL, "b.example.com", cookie); got != http.StatusSeeOther {
-		t.Errorf("a session minted from site A's own password must not be accepted on site B, got %d", got)
-	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp, string(b)
 }
 
-// TestLoginLimiterIsPerSite guards the rate limiter's (site_id, IP) key: a
-// shared key would let one tenant's brute-force lockout collaterally lock
-// every other tenant's admin out from the same source address.
-func TestLoginLimiterIsPerSite(t *testing.T) {
-	ts, _, _ := setupTwoSiteServer(t, "")
-	client := noRedirectClient()
-
-	// The budget is 5 attempts per 15 minutes; spend all of site A's.
-	for i := 0; i < 5; i++ {
-		resp := postLogin(t, client, ts.URL, "a.example.com", "wrongpass")
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("attempt %d on site A: expected the login form back, got %d", i+1, resp.StatusCode)
+func (e *env) login(host string, headers map[string]string) (*http.Response, *http.Cookie) {
+	e.t.Helper()
+	resp, _ := e.do(http.MethodPost, host, "/admin/login", url.Values{"username": {"root"}, "password": {"rootpass"}}, headers, nil)
+	for _, c := range resp.Cookies() {
+		if c.Name == "ntx_session" {
+			return resp, c
 		}
 	}
+	return resp, nil
+}
 
-	exhausted := postLogin(t, client, ts.URL, "a.example.com", "passA")
-	body, _ := io.ReadAll(exhausted.Body)
-	exhausted.Body.Close()
-	if !strings.Contains(string(body), "Too many attempts") {
-		t.Fatalf("expected site A to be rate-limited after 5 attempts, got: %s", body)
+func TestHostResolutionNormalises(t *testing.T) {
+	e := setup(t)
+	if resp, body := e.do(http.MethodGet, "A.Example.COM:8443", "/", nil, nil, nil); resp.StatusCode != 200 || !strings.Contains(body, "home of Site A") {
+		t.Errorf("mixed-case host with a port: %d %s", resp.StatusCode, body)
 	}
-
-	// Same client, same source IP, different site: must still be allowed.
-	resp := postLogin(t, client, ts.URL, "b.example.com", "passB")
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusSeeOther {
-		other, _ := io.ReadAll(resp.Body)
-		t.Errorf("site A's lockout must not block site B from the same IP, got %d: %s", resp.StatusCode, other)
+	if resp, _ := e.do(http.MethodGet, "ADMIN.example.com:443", "/admin/login", nil, nil, nil); resp.StatusCode != 200 {
+		t.Errorf("platform host with a port: %d", resp.StatusCode)
 	}
 }
 
-// TestHostMatchIsCaseInsensitive and TestHostMatchIgnoresPort cover the two
-// normalizations resolveSite performs. Both are stated requirements, and both
-// were untested: deleting the port handling makes every request 404 behind any
-// proxy that forwards "Host: host:port", a total outage that CI would wave
-// through.
-func TestHostMatchIsCaseInsensitive(t *testing.T) {
-	ts, _, _ := setupServer(t)
-
-	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/", nil)
-	req.Host = "EXAMPLE.COM"
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
+func TestUnknownHost404(t *testing.T) {
+	e := setup(t)
+	if resp, _ := e.do(http.MethodGet, "nope.example.com", "/", nil, nil, nil); resp.StatusCode != 404 {
+		t.Errorf("unknown host: %d", resp.StatusCode)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 for an upper-case Host, got %d", resp.StatusCode)
+	if resp, _ := e.do(http.MethodGet, "nope.example.com", "/admin/login", nil, nil, nil); resp.StatusCode != 404 {
+		t.Errorf("unknown host admin: %d", resp.StatusCode)
 	}
 }
 
-func TestHostMatchIgnoresPort(t *testing.T) {
-	ts, _, _ := setupServer(t)
-
-	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/", nil)
-	req.Host = "example.com:8443"
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
+func TestPlatformHostServesOnlyAdmin(t *testing.T) {
+	e := setup(t)
+	for _, path := range []string{"/", "/blog", "/projects/one", "/static/x.css"} {
+		if resp, _ := e.do(http.MethodGet, platformHost, path, nil, nil, nil); resp.StatusCode != 404 {
+			t.Errorf("%s on the platform host: %d, want 404", path, resp.StatusCode)
+		}
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 for a Host carrying a port, got %d", resp.StatusCode)
+	if resp, _ := e.do(http.MethodGet, platformHost, "/admin/login", nil, nil, nil); resp.StatusCode != 200 {
+		t.Errorf("/admin/login on the platform host: %d", resp.StatusCode)
 	}
-}
-
-// TestServerNewRejectsSitesWithoutDatabaseID guards addendum Ruling 10: if
-// EnsureSites was never run, every site's ID is the zero value and the
-// per-site handlers would collapse into one. server.New must fail fast
-// instead. This is the one test in this file that must NOT call
-// models.EnsureSites.
-func TestServerNewRejectsSitesWithoutDatabaseID(t *testing.T) {
-	database, err := db.Open("sqlite://:memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		sqlDB, _ := database.DB()
-		sqlDB.Close()
-	})
-
-	tmpDir := t.TempDir()
-	setupTemplates(t, tmpDir)
-
-	hash, _ := auth.HashPassword("testpass")
-	sites := []config.Site{
-		{
-			Key:               "mysite",
-			SiteURL:           "example.com",
-			TemplatePath:      tmpDir,
-			StaticPath:        tmpDir,
-			AboutSlug:         "about-page",
-			AdminPasswordHash: hash,
-			// ID intentionally left at the zero value: EnsureSites was
-			// never called.
-		},
-	}
-
-	cfg := &config.Config{
-		SessionSecret: "testsecretkey12345678901234567890",
-		Dev:           true,
-		Sites:         sites,
-	}
-
-	rawPosts := models.NewPostStore(database)
-	session := auth.NewSessionManager(cfg.SessionSecret, false)
-
-	_, err = New(cfg, rawPosts, session)
-	if err == nil {
-		t.Fatal("expected error for site with unpopulated database id, got nil")
+	if resp, _ := e.do(http.MethodGet, platformHost, "/admin/assets/admin.css", nil, nil, nil); resp.StatusCode != 200 {
+		t.Errorf("admin assets on the platform host: %d", resp.StatusCode)
 	}
 }
 
-// TestServerNewRejectsReservedSectionSlug: every site's section slugs are
-// registered on one shared router, and chi lets a later /blog/{page} win
-// over /blog/{slug}. One site configuring a "blog" section would 404 every
-// other site's posts. config.Load rejects this, but server.New takes a
-// Config directly, so it must refuse too.
-func TestServerNewRejectsReservedSectionSlug(t *testing.T) {
-	database, err := db.Open("sqlite://:memory:")
-	if err != nil {
-		t.Fatal(err)
+func TestRootLoginFlowOnSite(t *testing.T) {
+	e := setup(t)
+	resp, c := e.login("a.example.com", nil)
+	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != "/admin/posts" || c == nil {
+		t.Fatalf("login on a site: %d → %q", resp.StatusCode, resp.Header.Get("Location"))
 	}
-	t.Cleanup(func() {
-		sqlDB, _ := database.DB()
-		sqlDB.Close()
-	})
-	tmpDir := t.TempDir()
-	setupTemplates(t, tmpDir)
-
-	hash, _ := auth.HashPassword("testpass")
-	sites := []config.Site{
-		{Key: "a", SiteURL: "a.example.com", TemplatePath: tmpDir, StaticPath: tmpDir, AdminPasswordHash: hash,
-			Sections: []config.Section{{Slug: "blog"}}},
-		{Key: "b", SiteURL: "b.example.com", TemplatePath: tmpDir, StaticPath: tmpDir, AdminPasswordHash: hash},
-	}
-	if err := models.EnsureSites(database, sites); err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.Config{SessionSecret: "testsecretkey12345678901234567890", Dev: true, Sites: sites}
-
-	if _, err := New(cfg, models.NewPostStore(database), auth.NewSessionManager(cfg.SessionSecret, false)); err == nil {
-		t.Fatal("expected server.New to reject a section slug that shadows /blog, got nil")
+	if resp, _ := e.do(http.MethodGet, "a.example.com", "/admin/posts", nil, nil, c); resp.StatusCode != 200 {
+		t.Errorf("/admin/posts with the cookie: %d", resp.StatusCode)
 	}
 }
 
-// TestGlobalAdminGuessesShareOneBudgetAcrossSites: every site's login form
-// also accepts the global admin password, so if the only limit were per
-// site, N sites would give one IP 5*N guesses at the one credential that
-// unlocks all of them. Wrong guesses must also drain a per-IP budget for
-// the global password that every site shares.
-func TestGlobalAdminGuessesShareOneBudgetAcrossSites(t *testing.T) {
-	globalHash, _ := auth.HashPassword("globalpass")
-	ts, _, _ := setupTwoSiteServer(t, globalHash)
-	client := noRedirectClient()
+func TestRootLoginOnPlatformHost(t *testing.T) {
+	e := setup(t)
+	resp, c := e.login(platformHost, nil)
+	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != "/admin/platform/sites" {
+		t.Fatalf("login on the platform host: %d → %q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	if resp, body := e.do(http.MethodGet, platformHost, "/admin/platform/sites", nil, nil, c); resp.StatusCode != 200 || !strings.Contains(body, "a.example.com") {
+		t.Errorf("platform sites page: %d", resp.StatusCode)
+	}
+}
 
+// Review Focus 5.
+func TestSessionBoundToIssuingHost(t *testing.T) {
+	e := setup(t)
+	_, siteCookie := e.login("a.example.com", nil)
+	for _, tc := range []struct{ host, path string }{
+		{"b.example.com", "/admin/posts"},
+		{platformHost, "/admin/platform/sites"},
+	} {
+		if resp, _ := e.do(http.MethodGet, tc.host, tc.path, nil, nil, siteCookie); resp.StatusCode != http.StatusSeeOther {
+			t.Errorf("site A's session on %s%s: %d, want 303 to sign-in", tc.host, tc.path, resp.StatusCode)
+		}
+	}
+	_, platCookie := e.login(platformHost, nil)
+	if resp, _ := e.do(http.MethodGet, "a.example.com", "/admin/posts", nil, nil, platCookie); resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("the platform session on site A: %d, want 303", resp.StatusCode)
+	}
+}
+
+func TestLoginFailuresRateLimitedPerClientIP(t *testing.T) {
+	e := setup(t)
+	attacker := map[string]string{"X-Forwarded-For": "1.1.1.1"}
 	for i := 0; i < 5; i++ {
-		resp := postLogin(t, client, ts.URL, "a.example.com", "wrongpass")
-		resp.Body.Close()
+		e.do(http.MethodPost, "a.example.com", "/admin/login", url.Values{"username": {"root"}, "password": {"wrong"}}, attacker, nil)
 	}
-
-	// Site B's own budget is untouched, but the global password has already
-	// had its 5 guesses from this IP: it must not be tried again.
-	resp := postLogin(t, client, ts.URL, "b.example.com", "globalpass")
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode == http.StatusSeeOther {
-		t.Fatal("global admin password was accepted on site B after 5 failed guesses on site A from the same IP")
+	_, body := e.do(http.MethodPost, "a.example.com", "/admin/login", url.Values{"username": {"root"}, "password": {"rootpass"}}, attacker, nil)
+	if !strings.Contains(body, "Too many attempts") {
+		t.Errorf("the 6th attempt from the attacker's IP must be refused, got: %s", body)
 	}
-	if !strings.Contains(string(body), "Too many attempts") {
-		t.Errorf("expected a rate-limit message, got: %s", body)
+	// Same budget across hosts.
+	_, body = e.do(http.MethodPost, platformHost, "/admin/login", url.Values{"username": {"root"}, "password": {"rootpass"}}, attacker, nil)
+	if !strings.Contains(body, "Too many attempts") {
+		t.Error("the budget must be shared across hosts")
 	}
-}
-
-// TestSitePasswordStillWorksWhenGlobalBudgetIsSpent keeps the per-site
-// independence TestLoginLimiterIsPerSite asserts: draining the shared
-// global-password budget via site A must not lock site B's own admin out.
-func TestSitePasswordStillWorksWhenGlobalBudgetIsSpent(t *testing.T) {
-	globalHash, _ := auth.HashPassword("globalpass")
-	ts, _, _ := setupTwoSiteServer(t, globalHash)
-	client := noRedirectClient()
-
-	for i := 0; i < 5; i++ {
-		resp := postLogin(t, client, ts.URL, "a.example.com", "wrongpass")
-		resp.Body.Close()
-	}
-
-	resp := postLogin(t, client, ts.URL, "b.example.com", "passB")
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusSeeOther {
-		body, _ := io.ReadAll(resp.Body)
-		t.Errorf("site B's own password must still work, got %d: %s", resp.StatusCode, body)
+	// Another client is unaffected.
+	if resp, _ := e.login("a.example.com", map[string]string{"X-Forwarded-For": "2.2.2.2"}); resp.StatusCode != http.StatusSeeOther {
+		t.Errorf("another client's correct login must succeed, got %d", resp.StatusCode)
 	}
 }
 
-// helpers
-
-func createPost(t *testing.T, s *models.PostStore, slug, title string, published bool, tags ...string) *models.Post {
-	t.Helper()
-	p := &models.Post{Slug: slug, Title: title, Body: ".", Published: published, Tags: tags}
-	if err := s.Create(p); err != nil {
-		t.Fatalf("createPost %q: %v", slug, err)
+func TestSuccessfulLoginsDontConsumeBudget(t *testing.T) {
+	e := setup(t)
+	for i := 0; i < 6; i++ {
+		if resp, _ := e.login("a.example.com", nil); resp.StatusCode != http.StatusSeeOther {
+			t.Fatalf("login %d: %d", i+1, resp.StatusCode)
+		}
 	}
-	return p
 }
 
-func itoa(n int64) string {
-	return strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(
-		fmt.Sprintf("%d", n), " ", ""), "\n", ""))
+func TestCrossOriginPostRejected(t *testing.T) {
+	e := setup(t)
+	resp, _ := e.do(http.MethodPost, "a.example.com", "/admin/login", url.Values{"username": {"root"}, "password": {"rootpass"}},
+		map[string]string{"Sec-Fetch-Site": "cross-site"}, nil)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("a cross-site POST must be rejected, got %d", resp.StatusCode)
+	}
+}
+
+// Review Focus 2.
+func TestMissingThemeKeepsAdminWorking(t *testing.T) {
+	e := setup(t)
+	if err := os.RemoveAll(filepath.Join(e.themes, "t1")); err != nil {
+		t.Fatal(err)
+	}
+	if resp, _ := e.do(http.MethodGet, "a.example.com", "/", nil, nil, nil); resp.StatusCode != 500 {
+		t.Errorf("a site whose theme is gone: %d, want 500", resp.StatusCode)
+	}
+	if resp, _ := e.do(http.MethodGet, "a.example.com", "/admin/login", nil, nil, nil); resp.StatusCode != 200 {
+		t.Errorf("admin must keep working without the theme: %d", resp.StatusCode)
+	}
+}
+
+func TestSectionRouteDynamic(t *testing.T) {
+	e := setup(t)
+	_, c := e.login("a.example.com", nil)
+	form := url.Values{"name": {"Site A"}, "sections": {`[{"slug":"projects","pages":[{"slug":"one","title":"One"}]}]`}}
+	if resp, body := e.do(http.MethodPost, "a.example.com", "/admin/settings", form, nil, c); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("saving sections: %d %s", resp.StatusCode, body)
+	}
+	if resp, body := e.do(http.MethodGet, "a.example.com", "/projects/one", nil, nil, nil); resp.StatusCode != 200 || !strings.Contains(body, "project One") {
+		t.Errorf("section page on site A: %d %s", resp.StatusCode, body)
+	}
+	if resp, _ := e.do(http.MethodGet, "b.example.com", "/projects/one", nil, nil, nil); resp.StatusCode != 404 {
+		t.Errorf("site B didn't define the section: %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestBlogSlugNotShadowedBySection(t *testing.T) {
+	e := setup(t)
+	if err := e.posts.ForSite(e.siteA.ID).Create(&models.Post{Slug: "x", Title: "Post X", Body: ".", Published: true}); err != nil {
+		t.Fatal(err)
+	}
+	if resp, body := e.do(http.MethodGet, "a.example.com", "/blog/x", nil, nil, nil); resp.StatusCode != 200 || !strings.Contains(body, "Post X") {
+		t.Errorf("/blog/x: %d %s", resp.StatusCode, body)
+	}
+}
+
+func TestTenantIsolation(t *testing.T) {
+	e := setup(t)
+	if err := e.posts.ForSite(e.siteA.ID).Create(&models.Post{Slug: "only-a", Title: "Only A", Body: ".", Published: true}); err != nil {
+		t.Fatal(err)
+	}
+	if resp, _ := e.do(http.MethodGet, "b.example.com", "/blog/only-a", nil, nil, nil); resp.StatusCode != 404 {
+		t.Errorf("site A's post on site B: %d, want 404", resp.StatusCode)
+	}
+	if _, body := e.do(http.MethodGet, "b.example.com", "/blog", nil, nil, nil); strings.Contains(body, "Only A") {
+		t.Error("site B's blog index must not list site A's post")
+	}
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	e := setup(t)
+	resp, _ := e.do(http.MethodGet, "a.example.com", "/", nil, nil, nil)
+	if got := resp.Header.Get("Content-Security-Policy"); got != "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:" {
+		t.Errorf("CSP: %q", got)
+	}
+	if resp.Header.Get("X-Frame-Options") != "DENY" {
+		t.Error("X-Frame-Options must be DENY")
+	}
+}
+
+// Behind a proxy, logs must name the real client (from the trusted
+// proxy's X-Forwarded-For), not the proxy.
+func TestRequestLogShowsClientIP(t *testing.T) {
+	e := setup(t)
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	e.do(http.MethodGet, "a.example.com", "/", nil, map[string]string{"X-Forwarded-For": "203.0.113.9"}, nil)
+	out := buf.String()
+	if !strings.Contains(out, "203.0.113.9") {
+		t.Errorf("request log must show the client IP, got: %s", out)
+	}
+	if !strings.Contains(out, "a.example.com") || !strings.Contains(out, " 200 ") {
+		t.Errorf("request log must show host and status, got: %s", out)
+	}
 }
