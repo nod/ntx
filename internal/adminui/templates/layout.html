@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{block "title" .}}admin{{end}} — ntx</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css">
+  <script src="/admin/assets/admin.js" defer></script>
+</head>
+<body>
+  <header class="bar">
+    <span class="brand">ntx{{with .Site}} · {{.Name}}{{else}} · platform{{end}}</span>
+    {{with .Actor}}
+    <nav>
+      {{if $.Site}}<a href="/admin/posts">posts</a><a href="/admin/settings">settings</a>{{end}}
+      {{if .IsPlatform}}<a href="/admin/platform/sites">sites</a>{{end}}
+      <form method="POST" action="/admin/logout" class="inline"><button type="submit" class="link">sign out</button></form>
+    </nav>
+    {{end}}
+  </header>
+  <main>
+    {{with .Error}}<p class="error" role="alert">{{.}}</p>{{end}}
+    {{block "content" .}}{{end}}
+  </main>
+</body>
+</html>

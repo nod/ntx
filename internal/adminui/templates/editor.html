@@ -1,0 +1,27 @@
+{{define "title"}}{{if .Post}}edit post{{else}}new post{{end}}{{end}}
+{{define "content"}}
+<section>
+  <div class="row">
+    <h1>{{if .Post}}edit post{{else}}new post{{end}}</h1>
+    <a href="/admin/posts" class="button">back</a>
+  </div>
+  <form method="POST" action="{{with .Post}}/admin/posts/{{.ID}}{{else}}/admin/posts{{end}}" class="stack">
+    <label for="title">title</label>
+    <input type="text" id="title" name="title" value="{{with .Post}}{{.Title}}{{end}}" data-slug-source="slug" required>
+    <label for="slug">slug</label>
+    <input type="text" id="slug" name="slug" value="{{with .Post}}{{.Slug}}{{end}}" required>
+    <label for="tags">tags (comma-separated)</label>
+    <input type="text" id="tags" name="tags" value="{{with .Post}}{{join .Tags ", "}}{{end}}">
+    <label for="body">body (markdown)</label>
+    <textarea id="body" name="body" rows="24">{{with .Post}}{{.Body}}{{end}}</textarea>
+    <div class="actions">
+      <button type="submit" name="action" value="save">save</button>
+      <button type="submit" name="action" value="publish" class="primary">publish</button>
+      {{if .Post}}
+      <button type="submit" name="action" value="unpublish">unpublish</button>
+      <button type="submit" name="action" value="delete" class="danger" data-confirm="Delete this post?">delete</button>
+      {{end}}
+    </div>
+  </form>
+</section>
+{{end}}
