@@ -2,31 +2,16 @@ package models
 
 import (
 	"testing"
-
-	"github.com/nod/ntx/internal/db"
 )
 
 func newTestStores(t *testing.T) (siteA, siteB *PostStore) {
 	t.Helper()
-	database, err := db.Open("sqlite://:memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		sqlDB, _ := database.DB()
-		sqlDB.Close()
-	})
-	// The 001->002 migration backfills exactly one site ("default", id 1).
-	// posts.site_id/tags.site_id carry a NOT NULL FK to sites(id), enforced
-	// because db.Open turns on PRAGMA foreign_keys -- so site 2 needs a real
-	// row too, or every write through ForSite(2) below fails FK validation.
-	if err := database.Exec(
-		"INSERT INTO sites (key, hostname) VALUES (?, ?)", "site-b", "site-b.example.com",
-	).Error; err != nil {
-		t.Fatal(err)
-	}
+	database := newTestSiteDB(t)
+	sites := NewSiteStore(database)
+	a := mustCreateSite(t, sites, "site-a", "site-a.example.com")
+	b := mustCreateSite(t, sites, "site-b", "site-b.example.com")
 	raw := NewPostStore(database)
-	return raw.ForSite(1), raw.ForSite(2)
+	return raw.ForSite(a.ID), raw.ForSite(b.ID)
 }
 
 func newTestDB(t *testing.T) *PostStore {
