@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"fmt"
 	"html/template"
 	"log"
@@ -8,11 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
+	"github.com/nod/ntx/internal/adminui"
 	"github.com/nod/ntx/internal/auth"
-	"github.com/nod/ntx/internal/config"
 	"github.com/nod/ntx/internal/models"
 	"github.com/nod/ntx/internal/sitectx"
+	"github.com/nod/ntx/internal/sitereg"
+	"github.com/nod/ntx/internal/themes"
 )
 
 type TemplateCache struct {
@@ -91,103 +95,119 @@ func templateFuncs() template.FuncMap {
 	}
 }
 
-// siteHandler bundles the per-site resources a request needs once its
-// site has been resolved: this site's config, its scoped post store, and
-// the template cache for its template_path (shared with every other site
-// using the same directory).
-type siteHandler struct {
-	site      config.Site
-	posts     *models.PostStore
-	templates *TemplateCache
-}
-
-func (sh *siteHandler) siteData() map[string]interface{} {
-	return map[string]interface{}{
-		"SiteName":        sh.site.SiteName,
-		"SiteURL":         sh.site.SiteURL,
-		"SiteDescription": sh.site.SiteDescription,
-	}
+// Deps is everything the handlers need.
+type Deps struct {
+	Sites            *models.SiteStore
+	Posts            *models.PostStore // unscoped; handlers call ForSite
+	Users            *models.UserStore
+	Registry         *sitereg.Registry
+	Auth             *auth.Manager
+	Limiter          *auth.Limiter
+	ThemesPath       string
+	PlatformHostname string
+	RootPasswordHash string
+	Dev              bool
 }
 
 type Handler struct {
-	session         *auth.SessionManager
-	limiter         *loginLimiter
-	sites           map[int64]*siteHandler
-	ordered         []*siteHandler // same handlers as sites, in config order
-	globalAdminHash string
+	d Deps
+
+	mu     sync.Mutex
+	caches map[string]*TemplateCache // by theme name
 }
 
-// New builds a Handler serving every site in sites, backed by posts
-// (an unscoped store — New calls posts.ForSite per site internally).
-func New(sites []config.Site, posts *models.PostStore, session *auth.SessionManager, dev bool, globalAdminHash string) (*Handler, error) {
-	// Ruling 10: h.sites is keyed by site.ID, so if EnsureSites never ran,
-	// every site has ID 0 and they all collapse into one map entry, last
-	// write wins -- every host would serve one site's posts. Persisted ids
-	// start at 1, so ID == 0 always means "EnsureSites was not called",
-	// never a real tenant. Both `serve` (via server.New) and `generate`
-	// come through here, so this is the one place the guard lives.
-	for i := range sites {
-		if sites[i].ID == 0 {
-			return nil, fmt.Errorf("site %q has no database id: models.EnsureSites must run before handlers.New", sites[i].Key)
-		}
-	}
-
-	h := &Handler{
-		session:         session,
-		limiter:         newLoginLimiter(),
-		sites:           make(map[int64]*siteHandler, len(sites)),
-		globalAdminHash: globalAdminHash,
-	}
-	// Sites usually share the global template_path; parse each distinct
-	// directory once and share the (read-only) cache between them.
-	caches := make(map[string]*TemplateCache)
-	for _, site := range sites {
-		dir := filepath.Clean(site.TemplatePath)
-		tc, ok := caches[dir]
-		if !ok {
-			var err error
-			tc, err = NewTemplateCache(dir, dev)
-			if err != nil {
-				return nil, fmt.Errorf("loading templates for site %q: %w", site.Key, err)
-			}
-			caches[dir] = tc
-		}
-		sh := &siteHandler{
-			site:      site,
-			posts:     posts.ForSite(site.ID),
-			templates: tc,
-		}
-		h.sites[site.ID] = sh
-		h.ordered = append(h.ordered, sh)
-	}
-	return h, nil
+func New(d Deps) *Handler {
+	return &Handler{d: d, caches: make(map[string]*TemplateCache)}
 }
 
-// serve resolves the request's site -- already attached via sitectx by
-// server's Host-routing middleware -- and hands its siteHandler to fn. It is
-// the one place handlers deal with an unresolved site: a bare 404.
-func (h *Handler) serve(w http.ResponseWriter, r *http.Request, fn func(http.ResponseWriter, *http.Request, *siteHandler)) {
+// serve hands the request's resolved site to fn, or 404s if there is none
+// (the platform host has no site). It is the one place handlers deal with
+// an unresolved site.
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, fn func(http.ResponseWriter, *http.Request, *models.Site)) {
 	site := sitectx.From(r)
 	if site == nil {
 		h.notFound(w)
 		return
 	}
-	sh, ok := h.sites[site.ID]
-	if !ok {
-		h.notFound(w)
-		return
-	}
-	fn(w, r, sh)
+	fn(w, r, site)
 }
 
-func (h *Handler) render(w http.ResponseWriter, sh *siteHandler, name string, data map[string]interface{}) {
-	content, err := h.renderToBytes(sh, name, data)
+func (h *Handler) posts(site *models.Site) *models.PostStore { return h.d.Posts.ForSite(site.ID) }
+
+// templates returns the template cache for site's theme. Sites on the same
+// theme share one cache, built on first use.
+func (h *Handler) templates(site *models.Site) (*TemplateCache, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if tc, ok := h.caches[site.Theme]; ok {
+		return tc, nil
+	}
+	dir, err := themes.Dir(h.d.ThemesPath, site.Theme)
 	if err != nil {
-		h.serverError(w, err)
+		return nil, err
+	}
+	tc, err := NewTemplateCache(filepath.Join(dir, "templates"), h.d.Dev)
+	if err != nil {
+		return nil, fmt.Errorf("loading theme %q: %w", site.Theme, err)
+	}
+	h.caches[site.Theme] = tc
+	return tc, nil
+}
+
+func siteData(site *models.Site) map[string]interface{} {
+	return map[string]interface{}{
+		"SiteName":        site.Name,
+		"SiteURL":         site.Hostname,
+		"SiteDescription": site.Description,
+	}
+}
+
+// renderToBytes renders a theme template for site with the site's data
+// merged in.
+func (h *Handler) renderToBytes(site *models.Site, name string, data map[string]interface{}) ([]byte, error) {
+	tc, err := h.templates(site)
+	if err != nil {
+		return nil, err
+	}
+	t, err := tc.Get(name)
+	if err != nil {
+		return nil, err
+	}
+	merged := siteData(site)
+	for k, v := range data {
+		merged[k] = v
+	}
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, merged); err != nil {
+		return nil, fmt.Errorf("executing %s: %w", name, err)
+	}
+	return buf.Bytes(), nil
+}
+
+// render writes a public page from the site's theme. A missing theme or
+// template is a server error, logged; admin pages don't depend on themes,
+// so root can still sign in and fix it.
+func (h *Handler) render(w http.ResponseWriter, site *models.Site, name string, data map[string]interface{}) {
+	content, err := h.renderToBytes(site, name, data)
+	if err != nil {
+		h.serverError(w, fmt.Errorf("site %q: %w", site.Key, err))
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(content)
+}
+
+// admin renders an embedded admin page with the shared keys filled in.
+func (h *Handler) admin(w http.ResponseWriter, r *http.Request, page string, data map[string]any) {
+	if data == nil {
+		data = map[string]any{}
+	}
+	data["Actor"] = auth.ActorFrom(r)
+	data["Site"] = sitectx.From(r)
+	if _, ok := data["Error"]; !ok {
+		data["Error"] = ""
+	}
+	adminui.Render(w, page, data)
 }
 
 func (h *Handler) serverError(w http.ResponseWriter, err error) {
@@ -197,4 +217,38 @@ func (h *Handler) serverError(w http.ResponseWriter, err error) {
 
 func (h *Handler) notFound(w http.ResponseWriter) {
 	http.Error(w, "Not Found", http.StatusNotFound)
+}
+
+// RequireSiteAdmin gates site-admin pages: anonymous requests go to the
+// sign-in page, the platform host has no site pages, and a signed-in actor
+// without site-admin powers gets 403.
+func (h *Handler) RequireSiteAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		a := auth.ActorFrom(r)
+		switch {
+		case sitectx.From(r) == nil:
+			h.notFound(w)
+		case a == nil:
+			http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+		case !a.CanAdminSite():
+			http.Error(w, "Forbidden", http.StatusForbidden)
+		default:
+			next.ServeHTTP(w, r)
+		}
+	})
+}
+
+// RequirePlatform gates the platform views to root and platform admins.
+func (h *Handler) RequirePlatform(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		a := auth.ActorFrom(r)
+		switch {
+		case a == nil:
+			http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+		case !a.IsPlatform():
+			http.Error(w, "Forbidden", http.StatusForbidden)
+		default:
+			next.ServeHTTP(w, r)
+		}
+	})
 }

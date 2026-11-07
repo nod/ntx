@@ -3,39 +3,31 @@ package handlers
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
-	"gorm.io/gorm"
+	"github.com/go-chi/chi/v5"
 
 	"github.com/nod/ntx/internal/auth"
-	"github.com/nod/ntx/internal/config"
 	"github.com/nod/ntx/internal/db"
 	"github.com/nod/ntx/internal/models"
+	"github.com/nod/ntx/internal/sitectx"
+	"github.com/nod/ntx/internal/sitereg"
 )
 
-func newTestDB(t *testing.T) *gorm.DB {
-	t.Helper()
-	database, err := db.Open("sqlite://:memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		sqlDB, _ := database.DB()
-		sqlDB.Close()
-	})
-	return database
-}
+const platformHost = "admin.example.com"
 
-// writeTemplates lays down the minimum template set Generate walks. The post
-// template renders the post title so generated output can be told apart per
-// site; the directory doubles as static_path, which Generate copies verbatim.
-func writeTemplates(t *testing.T, dir string) {
+// writeTheme lays down a theme named name under root: the minimum template
+// set public pages and Generate use, a section page, and one static file.
+// The post template renders the title, so output can be told apart per site.
+func writeTheme(t *testing.T, root, name string) {
 	t.Helper()
 	write := func(path, content string) {
-		full := filepath.Join(dir, path)
+		full := filepath.Join(root, name, path)
 		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -43,244 +35,371 @@ func writeTemplates(t *testing.T, dir string) {
 			t.Fatal(err)
 		}
 	}
-	write("base.html", `<!DOCTYPE html><html><body>{{block "content" .}}{{end}}</body></html>`)
-	write("home.html", `{{template "base.html" .}}{{define "content"}}home of {{.SiteName}}{{end}}`)
-	write("blog/index.html", `{{template "base.html" .}}{{define "content"}}{{range .Posts}}{{.Title}} {{end}}{{end}}`)
-	write("blog/post.html", `{{template "base.html" .}}{{define "content"}}{{.Post.Title}}{{end}}`)
+	write("templates/base.html", `<!DOCTYPE html><html><body>{{block "content" .}}{{end}}</body></html>`)
+	write("templates/home.html", `{{template "base.html" .}}{{define "content"}}home of {{.SiteName}}{{end}}`)
+	write("templates/blog/index.html", `{{template "base.html" .}}{{define "content"}}{{range .Posts}}{{.Title}} {{end}}tags:{{range .AllTags}}{{.}} {{end}}{{end}}`)
+	write("templates/blog/post.html", `{{template "base.html" .}}{{define "content"}}{{.Post.Title}}{{end}}`)
+	write("templates/sections/projects/one/index.html", `{{template "base.html" .}}{{define "content"}}project {{.Title}}{{end}}`)
+	write("static/css/x.css", `body{}`)
 }
 
-// TestNewRejectsSiteWithoutDatabaseID guards Ruling 10 at the place the
-// collapse actually happens. Handler.sites is keyed by site.ID, so a set of
-// sites that never went through models.EnsureSites all carry ID 0 and fold
-// into a single map entry. Both server.New and `generate` rely on this check.
-func TestNewRejectsSiteWithoutDatabaseID(t *testing.T) {
-	database := newTestDB(t)
-	tmpDir := t.TempDir()
-	writeTemplates(t, tmpDir)
-
-	hash, _ := auth.HashPassword("testpass")
-	sites := []config.Site{
-		{
-			Key:               "mysite",
-			SiteURL:           "mysite.example.com",
-			TemplatePath:      tmpDir,
-			StaticPath:        tmpDir,
-			AdminPasswordHash: hash,
-			// ID intentionally left at the zero value.
-		},
-	}
-
-	posts := models.NewPostStore(database)
-	session := auth.NewSessionManager("testsecretkey12345678901234567890", false)
-
-	if _, err := New(sites, posts, session, true, ""); err == nil {
-		t.Fatal("expected an error for a site with no database id, got nil")
-	}
+type env struct {
+	t        *testing.T
+	h        *Handler
+	reg      *sitereg.Registry
+	sites    *models.SiteStore
+	posts    *models.PostStore
+	themes   string
+	router   http.Handler
+	siteA    *models.Site
+	rootPass string
 }
 
-// TestGenerateIsolatesSiteOutput covers the only shipped feature with a
-// per-site output path: each site's pages must land under <out>/<key>/, and
-// neither site's output may contain the other's content.
-func TestGenerateIsolatesSiteOutput(t *testing.T) {
-	database := newTestDB(t)
-	tmpDir := t.TempDir()
-	writeTemplates(t, tmpDir)
-
-	hash, _ := auth.HashPassword("testpass")
-	sites := []config.Site{
-		{Key: "a", SiteURL: "a.example.com", SiteName: "Site A", TemplatePath: tmpDir, StaticPath: tmpDir, AdminPasswordHash: hash},
-		{Key: "b", SiteURL: "b.example.com", SiteName: "Site B", TemplatePath: tmpDir, StaticPath: tmpDir, AdminPasswordHash: hash},
-	}
-	if err := models.EnsureSites(database, sites); err != nil {
-		t.Fatal(err)
-	}
-
-	rawPosts := models.NewPostStore(database)
-	// Same slug on both sites, so the only thing distinguishing the two
-	// outputs is which site's row the generator read.
-	if err := rawPosts.ForSite(sites[0].ID).Create(&models.Post{
-		Slug: "shared-slug", Title: "Only On A", Body: ".", Published: true,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := rawPosts.ForSite(sites[1].ID).Create(&models.Post{
-		Slug: "shared-slug", Title: "Only On B", Body: ".", Published: true,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	session := auth.NewSessionManager("testsecretkey12345678901234567890", false)
-	h, err := New(sites, rawPosts, session, true, "")
+func newEnv(t *testing.T) *env {
+	t.Helper()
+	d, err := db.Open("sqlite://:memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { s, _ := d.DB(); s.Close() })
 
-	outDir := filepath.Join(t.TempDir(), "out")
-	if err := h.Generate(outDir); err != nil {
-		t.Fatalf("Generate: %v", err)
+	themesRoot := t.TempDir()
+	writeTheme(t, themesRoot, "t1")
+
+	users := models.NewUserStore(d)
+	if _, err := users.EnsureRoot(); err != nil {
+		t.Fatal(err)
 	}
+	sites := models.NewSiteStore(d)
+	a := &models.Site{Key: "a", Hostname: "a.example.com", Name: "Site A", Theme: "t1"}
+	if err := sites.Create(a, platformHost); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := sitereg.New(sites)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootHash, _ := auth.HashPassword("rootpass")
+	am := auth.NewManager(models.NewSessionStore(d), users, rootHash, false)
+	h := New(Deps{
+		Sites: sites, Posts: models.NewPostStore(d), Users: users, Registry: reg,
+		Auth: am, Limiter: auth.NewLimiter(), ThemesPath: themesRoot,
+		PlatformHostname: platformHost, RootPasswordHash: rootHash, Dev: true,
+	})
 
-	for _, tc := range []struct {
-		key   string
-		mine  string
-		other string
-	}{
-		{key: "a", mine: "Only On A", other: "Only On B"},
-		{key: "b", mine: "Only On B", other: "Only On A"},
-	} {
-		postPage := filepath.Join(outDir, tc.key, "blog", "shared-slug", "index.html")
-		body, err := os.ReadFile(postPage)
-		if err != nil {
-			t.Errorf("site %q: expected generated post at %s: %v", tc.key, postPage, err)
-			continue
-		}
-		if !strings.Contains(string(body), tc.mine) {
-			t.Errorf("site %q: generated post should contain %q, got: %s", tc.key, tc.mine, body)
-		}
-
-		// Nothing anywhere under this site's output may mention the other
-		// site's post -- not the post page, not the blog index.
-		siteOut := filepath.Join(outDir, tc.key)
-		err = filepath.Walk(siteOut, func(path string, info os.FileInfo, err error) error {
-			if err != nil || info.IsDir() {
-				return err
+	// A cut-down version of server's host resolution, so these tests drive
+	// the real route table and Require wrappers.
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if s := reg.ByHost(req.Host); s != nil {
+				req = sitectx.With(req, s)
+			} else if req.Host == platformHost {
+				req = sitectx.WithPlatform(req)
+			} else {
+				http.NotFound(w, req)
+				return
 			}
-			content, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			if strings.Contains(string(content), tc.other) {
-				rel, _ := filepath.Rel(outDir, path)
-				t.Errorf("site %q leaked the other site's post %q into %s", tc.key, tc.other, rel)
-			}
-			return nil
+			next.ServeHTTP(w, req)
 		})
-		if err != nil {
-			t.Errorf("walking %s: %v", siteOut, err)
+	})
+	r.Use(am.Middleware(func(req *http.Request) (int64, bool) {
+		if s := sitectx.From(req); s != nil {
+			return s.ID, true
+		}
+		return 0, false
+	}))
+	h.Mount(r)
+
+	return &env{t: t, h: h, reg: reg, sites: sites, posts: models.NewPostStore(d), themes: themesRoot, router: r, siteA: a, rootPass: "rootpass"}
+}
+
+// do sends one request to the router on host, carrying cookie if set.
+func (e *env) do(method, host, path string, form url.Values, cookie *http.Cookie) *httptest.ResponseRecorder {
+	e.t.Helper()
+	var req *http.Request
+	if form != nil {
+		req = httptest.NewRequest(method, path, strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	} else {
+		req = httptest.NewRequest(method, path, nil)
+	}
+	req.Host = host
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+	return rec
+}
+
+// login signs root in on host and returns the session cookie.
+func (e *env) login(host string) *http.Cookie {
+	e.t.Helper()
+	rec := e.do(http.MethodPost, host, "/admin/login", url.Values{"username": {"root"}, "password": {e.rootPass}}, nil)
+	if rec.Code != http.StatusSeeOther {
+		e.t.Fatalf("root login on %s: status %d, body %s", host, rec.Code, rec.Body.String())
+	}
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "ntx_session" {
+			return c
 		}
 	}
+	e.t.Fatal("no session cookie after login")
+	return nil
+}
 
-	// Each site's home page must render its own identity, which is what
-	// proves the per-site template data went with the per-site output path.
-	for _, tc := range []struct{ key, name string }{{"a", "Site A"}, {"b", "Site B"}} {
-		home, err := os.ReadFile(filepath.Join(outDir, tc.key, "index.html"))
-		if err != nil {
-			t.Errorf("site %q: expected a generated home page: %v", tc.key, err)
-			continue
+func (e *env) storedSite(key string) *models.Site {
+	e.t.Helper()
+	all, err := e.sites.List()
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	for i := range all {
+		if all[i].Key == key {
+			return &all[i]
 		}
+	}
+	return nil
+}
+
+// Review Focus 3: bad sections JSON must re-show the form, never 500, and
+// must leave the stored sections alone.
+func TestSettingsRejectsBadSectionsJSON(t *testing.T) {
+	e := newEnv(t)
+	c := e.login("a.example.com")
+	ok := url.Values{"name": {"Site A"}, "sections": {`[{"slug":"projects","pages":[{"slug":"one"}]}]`}}
+	if rec := e.do(http.MethodPost, "a.example.com", "/admin/settings", ok, c); rec.Code != http.StatusSeeOther {
+		t.Fatalf("valid sections: status %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	for name, sections := range map[string]string{
+		"vars not an object": `[{"slug":"x","vars":[1]}]`,
+		"not json":           `not json`,
+		"reserved slug":      `[{"slug":"blog"}]`,
+	} {
+		rec := e.do(http.MethodPost, "a.example.com", "/admin/settings", url.Values{"name": {"Changed"}, "sections": {sections}}, c)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `class="error"`) {
+			t.Errorf("%s: expected the form back with an error, got %d: %s", name, rec.Code, rec.Body.String())
+		}
+		got := e.storedSite("a")
+		if len(got.Sections) != 1 || got.Sections[0].Slug != "projects" || got.Name != "Site A" {
+			t.Errorf("%s: a rejected save must change nothing, got name %q sections %+v", name, got.Name, got.Sections)
+		}
+	}
+}
+
+func TestSettingsSavesSectionsAndReloads(t *testing.T) {
+	e := newEnv(t)
+	c := e.login("a.example.com")
+	form := url.Values{"name": {"New Name"}, "about_slug": {"me"}, "sections": {`[{"slug":"projects","title":"Projects","vars":{"k":"v"},"pages":[{"slug":"one","title":"One"}]}]`}}
+	if rec := e.do(http.MethodPost, "a.example.com", "/admin/settings", form, c); rec.Code != http.StatusSeeOther {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	live := e.reg.ByHost("a.example.com")
+	if live.Name != "New Name" || live.AboutSlug != "me" || len(live.Sections) != 1 || live.Sections[0].Vars["k"] != "v" {
+		t.Errorf("the registry must reflect the saved settings at once, got %+v", live)
+	}
+	if rec := e.do(http.MethodGet, "a.example.com", "/projects/one", nil, nil); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "project One") {
+		t.Errorf("the new section page must be served: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPlatformEditShowsConflictError(t *testing.T) {
+	e := newEnv(t)
+	b := &models.Site{Key: "b", Hostname: "b.example.com", Theme: "t1"}
+	if err := e.sites.Create(b, platformHost); err != nil {
+		t.Fatal(err)
+	}
+	e.reg.Reload()
+	c := e.login(platformHost)
+	form := url.Values{"hostname": {"b.example.com"}, "name": {"Site A"}, "theme": {"t1"}}
+	rec := e.do(http.MethodPost, platformHost, "/admin/platform/sites/a", form, c)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "already used") {
+		t.Fatalf("expected the form back with the conflict, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := e.storedSite("a"); got.Hostname != "a.example.com" {
+		t.Errorf("hostname must be unchanged, got %q", got.Hostname)
+	}
+}
+
+func TestPlatformCreateRejectsUnknownTheme(t *testing.T) {
+	e := newEnv(t)
+	c := e.login(platformHost)
+	form := url.Values{"key": {"new"}, "hostname": {"new.example.com"}, "theme": {"nope"}}
+	rec := e.do(http.MethodPost, platformHost, "/admin/platform/sites", form, c)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "theme") {
+		t.Fatalf("expected the form back with a theme error, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if e.storedSite("new") != nil {
+		t.Error("no site may be created with an unknown theme")
+	}
+}
+
+func TestPlatformCreateSite(t *testing.T) {
+	e := newEnv(t)
+	c := e.login(platformHost)
+	form := url.Values{"key": {"new"}, "hostname": {"New.Example.com"}, "name": {"New"}, "theme": {"t1"}}
+	if rec := e.do(http.MethodPost, platformHost, "/admin/platform/sites", form, c); rec.Code != http.StatusSeeOther {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := e.do(http.MethodGet, "new.example.com", "/", nil, nil); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "home of New") {
+		t.Errorf("a new site must be served straight away: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPlatformDeleteNeedsTypedKey(t *testing.T) {
+	e := newEnv(t)
+	c := e.login(platformHost)
+	rec := e.do(http.MethodPost, platformHost, "/admin/platform/sites/a/delete", url.Values{"confirm": {"wrong"}}, c)
+	if rec.Code != http.StatusOK || e.storedSite("a") == nil {
+		t.Fatalf("a wrong confirmation must keep the site: %d", rec.Code)
+	}
+	rec = e.do(http.MethodPost, platformHost, "/admin/platform/sites/a/delete", url.Values{"confirm": {"a"}}, c)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if e.storedSite("a") != nil || e.reg.ByID(e.siteA.ID) != nil {
+		t.Error("the site must be gone from the store and the registry")
+	}
+}
+
+func TestRequireRedirectsAnonymous(t *testing.T) {
+	e := newEnv(t)
+	for _, tc := range []struct{ host, path string }{
+		{platformHost, "/admin/platform/sites"},
+		{"a.example.com", "/admin/platform/sites"},
+		{"a.example.com", "/admin/posts"},
+		{"a.example.com", "/admin/settings"},
+	} {
+		rec := e.do(http.MethodGet, tc.host, tc.path, nil, nil)
+		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/admin/login" {
+			t.Errorf("%s%s anonymous: got %d → %q", tc.host, tc.path, rec.Code, rec.Header().Get("Location"))
+		}
+	}
+}
+
+func TestSiteAdminPagesNotOnPlatformHost(t *testing.T) {
+	e := newEnv(t)
+	c := e.login(platformHost)
+	for _, path := range []string{"/admin/posts", "/admin/settings", "/", "/blog"} {
+		if rec := e.do(http.MethodGet, platformHost, path, nil, c); rec.Code != http.StatusNotFound {
+			t.Errorf("%s on the platform host: got %d, want 404", path, rec.Code)
+		}
+	}
+}
+
+func TestPostLifecycle(t *testing.T) {
+	e := newEnv(t)
+	c := e.login("a.example.com")
+	form := url.Values{"title": {"Hello"}, "slug": {"hello"}, "body": {"hi"}, "tags": {"go, web"}, "action": {"save"}}
+	if rec := e.do(http.MethodPost, "a.example.com", "/admin/posts", form, c); rec.Code != http.StatusSeeOther {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := e.do(http.MethodGet, "a.example.com", "/blog/hello", nil, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("a draft must not be public, got %d", rec.Code)
+	}
+	p, _ := e.posts.ForSite(e.siteA.ID).GetBySlug("hello")
+	form.Set("action", "publish")
+	if rec := e.do(http.MethodPost, "a.example.com", "/admin/posts/"+itoa(p.ID), form, c); rec.Code != http.StatusSeeOther {
+		t.Fatalf("publish: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := e.do(http.MethodGet, "a.example.com", "/blog/hello", nil, nil); rec.Code != http.StatusOK {
+		t.Errorf("a published post must be public, got %d", rec.Code)
+	}
+}
+
+func TestGenerateIsolatesSiteOutput(t *testing.T) {
+	e := newEnv(t)
+	b := &models.Site{Key: "b", Hostname: "b.example.com", Name: "Site B", Theme: "t1"}
+	if err := e.sites.Create(b, platformHost); err != nil {
+		t.Fatal(err)
+	}
+	e.reg.Reload()
+	for _, tc := range []struct {
+		id    int64
+		title string
+	}{{e.siteA.ID, "Only On A"}, {b.ID, "Only On B"}} {
+		if err := e.posts.ForSite(tc.id).Create(&models.Post{Slug: "shared-slug", Title: tc.title, Body: ".", Published: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := filepath.Join(t.TempDir(), "out")
+	if err := e.h.Generate(out); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ key, mine, other, name string }{
+		{"a", "Only On A", "Only On B", "Site A"},
+		{"b", "Only On B", "Only On A", "Site B"},
+	} {
+		post, err := os.ReadFile(filepath.Join(out, tc.key, "blog", "shared-slug", "index.html"))
+		if err != nil || !strings.Contains(string(post), tc.mine) || strings.Contains(string(post), tc.other) {
+			t.Errorf("site %q post page wrong: %v %s", tc.key, err, post)
+		}
+		home, _ := os.ReadFile(filepath.Join(out, tc.key, "index.html"))
 		if !strings.Contains(string(home), "home of "+tc.name) {
-			t.Errorf("site %q: home page should name the site, got: %s", tc.key, home)
+			t.Errorf("site %q home should name the site: %s", tc.key, home)
+		}
+		if _, err := os.Stat(filepath.Join(out, tc.key, "static", "css", "x.css")); err != nil {
+			t.Errorf("site %q: theme static files must be copied: %v", tc.key, err)
 		}
 	}
 }
 
-// TestGenerateRunsSitesInConfigOrder: when a later site fails, every site
-// before it in the config must already have been written -- the same
-// partial output on every run, not whatever order a map happens to yield.
-func TestGenerateRunsSitesInConfigOrder(t *testing.T) {
-	database := newTestDB(t)
-	goodDir := t.TempDir()
-	writeTemplates(t, goodDir)
-	brokenDir := t.TempDir() // no templates at all: generating this site fails
-
-	hash, _ := auth.HashPassword("testpass")
-	sites := []config.Site{
-		{Key: "a", SiteURL: "a.example.com", TemplatePath: goodDir, StaticPath: goodDir, AdminPasswordHash: hash},
-		{Key: "b", SiteURL: "b.example.com", TemplatePath: goodDir, StaticPath: goodDir, AdminPasswordHash: hash},
-		{Key: "c", SiteURL: "c.example.com", TemplatePath: goodDir, StaticPath: goodDir, AdminPasswordHash: hash},
-		{Key: "broken", SiteURL: "broken.example.com", TemplatePath: brokenDir, StaticPath: brokenDir, AdminPasswordHash: hash},
+// When a later site fails, every site before it (in key order) must have
+// been written -- the same partial output on every run.
+func TestGenerateRunsSitesInOrder(t *testing.T) {
+	e := newEnv(t)
+	for _, k := range []string{"b", "c"} {
+		if err := e.sites.Create(&models.Site{Key: k, Hostname: k + ".example.com", Theme: "t1"}, platformHost); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := models.EnsureSites(database, sites); err != nil {
+	if err := e.sites.Create(&models.Site{Key: "zz", Hostname: "zz.example.com", Theme: "gone"}, platformHost); err != nil {
 		t.Fatal(err)
 	}
-	session := auth.NewSessionManager("testsecretkey12345678901234567890", false)
-	h, err := New(sites, models.NewPostStore(database), session, true, "")
-	if err != nil {
-		t.Fatal(err)
+	e.reg.Reload()
+	out := filepath.Join(t.TempDir(), "out")
+	if err := e.h.Generate(out); err == nil {
+		t.Fatal("expected Generate to fail on the site whose theme doesn't exist")
 	}
-
-	outDir := filepath.Join(t.TempDir(), "out")
-	if err := h.Generate(outDir); err == nil {
-		t.Fatal("expected Generate to fail on the site with no templates")
-	}
-	for _, key := range []string{"a", "b", "c"} {
-		if _, err := os.Stat(filepath.Join(outDir, key, "index.html")); err != nil {
-			t.Errorf("site %q precedes the failing site in config, so it must have been generated: %v", key, err)
+	for _, k := range []string{"a", "b", "c"} {
+		if _, err := os.Stat(filepath.Join(out, k, "index.html")); err != nil {
+			t.Errorf("site %q precedes the failing site, so it must have been generated: %v", k, err)
 		}
 	}
 }
 
-// TestSitesSharingATemplatePathShareOneCache: with N sites on the default
-// template_path, parsing the tree N times and holding N identical copies is
-// pure waste. Sites that point at the same directory share one cache; a
-// site that overrides template_path gets its own.
-func TestSitesSharingATemplatePathShareOneCache(t *testing.T) {
-	database := newTestDB(t)
-	shared := t.TempDir()
-	writeTemplates(t, shared)
-	own := t.TempDir()
-	writeTemplates(t, own)
-
-	hash, _ := auth.HashPassword("testpass")
-	sites := []config.Site{
-		{Key: "a", SiteURL: "a.example.com", TemplatePath: shared, StaticPath: shared, AdminPasswordHash: hash},
-		{Key: "b", SiteURL: "b.example.com", TemplatePath: shared + "/", StaticPath: shared, AdminPasswordHash: hash},
-		{Key: "c", SiteURL: "c.example.com", TemplatePath: own, StaticPath: own, AdminPasswordHash: hash},
-	}
-	if err := models.EnsureSites(database, sites); err != nil {
+func TestGeneratePublicTagsOnlyPublished(t *testing.T) {
+	e := newEnv(t)
+	ps := e.posts.ForSite(e.siteA.ID)
+	ps.Create(&models.Post{Slug: "draft", Title: "Draft", Body: ".", Tags: []string{"secret"}})
+	ps.Create(&models.Post{Slug: "live", Title: "Live", Body: ".", Published: true, Tags: []string{"go"}})
+	out := filepath.Join(t.TempDir(), "out")
+	if err := e.h.Generate(out); err != nil {
 		t.Fatal(err)
 	}
-	session := auth.NewSessionManager("testsecretkey12345678901234567890", false)
-	// dev=false so the caches actually parse at construction.
-	h, err := New(sites, models.NewPostStore(database), session, false, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	a, b, c := h.sites[sites[0].ID].templates, h.sites[sites[1].ID].templates, h.sites[sites[2].ID].templates
-	if a != b {
-		t.Error("sites a and b use the same template_path and should share one TemplateCache")
-	}
-	if a == c {
-		t.Error("site c overrides template_path and must get its own TemplateCache")
+	idx, _ := os.ReadFile(filepath.Join(out, "a", "blog", "index.html"))
+	if strings.Contains(string(idx), "secret") || !strings.Contains(string(idx), "go") {
+		t.Errorf("the public tag list must show only published posts' tags: %s", idx)
 	}
 }
 
-// TestHandlersNotFoundWithoutResolvedSite pins the one behaviour every
-// handler shares: a request carrying no resolved site is a 404 -- never a
-// panic, never another site's content.
+// Every handler that needs a site must 404 without one, never panic.
 func TestHandlersNotFoundWithoutResolvedSite(t *testing.T) {
-	database := newTestDB(t)
-	dir := t.TempDir()
-	writeTemplates(t, dir)
-	hash, _ := auth.HashPassword("testpass")
-	sites := []config.Site{{Key: "a", SiteURL: "a.example.com", TemplatePath: dir, StaticPath: dir, AdminPasswordHash: hash}}
-	if err := models.EnsureSites(database, sites); err != nil {
-		t.Fatal(err)
-	}
-	session := auth.NewSessionManager("testsecretkey12345678901234567890", false)
-	h, err := New(sites, models.NewPostStore(database), session, true, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	e := newEnv(t)
 	for name, fn := range map[string]http.HandlerFunc{
-		"Home":            h.Home,
-		"BlogIndex":       h.BlogIndex,
-		"BlogPost":        h.BlogPost,
-		"AdminLogin":      h.AdminLogin,
-		"AdminLoginPost":  h.AdminLoginPost,
-		"AdminPosts":      h.AdminPosts,
-		"AdminNewPost":    h.AdminNewPost,
-		"AdminCreatePost": h.AdminCreatePost,
-		"AdminEditPost":   h.AdminEditPost,
-		"AdminUpdatePost": h.AdminUpdatePost,
-		"SectionPage":     func(w http.ResponseWriter, r *http.Request) { h.SectionPage(w, r, "projects") },
+		"Home": e.h.Home, "About": e.h.About, "BlogIndex": e.h.BlogIndex, "BlogPost": e.h.BlogPost,
+		"Static": e.h.Static, "Section": e.h.Section, "Posts": e.h.Posts, "NewPost": e.h.NewPost,
+		"CreatePost": e.h.CreatePost, "EditPost": e.h.EditPost, "UpdatePost": e.h.UpdatePost,
+		"Settings": e.h.Settings, "SettingsPost": e.h.SettingsPost,
 	} {
 		rec := httptest.NewRecorder()
-		fn(rec, httptest.NewRequest(http.MethodGet, "/", nil)) // no sitectx attached
+		fn(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("%s: expected 404 with no resolved site, got %d", name, rec.Code)
 		}
 	}
 }
+
+func itoa(n int64) string { return strconv.FormatInt(n, 10) }
