@@ -20,6 +20,7 @@ import (
 	"github.com/nod/ntx/internal/handlers"
 	"github.com/nod/ntx/internal/models"
 	"github.com/nod/ntx/internal/server"
+	"github.com/nod/ntx/internal/sitereg"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -43,38 +44,19 @@ func rootCmd() *cobra.Command {
 		Short: "Start the HTTP server",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgFile, _ := cmd.Flags().GetString("config")
-			cfg, err := config.Load(cfgFile)
+			a, err := openApp(cfgFile)
 			if err != nil {
 				return err
 			}
+			defer a.close()
 
-			database, err := db.Open(cfg.DBDSN)
-			if err != nil {
-				return err
-			}
-			sqlDB, err := database.DB()
-			if err != nil {
-				return err
-			}
-			defer sqlDB.Close()
-
-			if err := models.EnsureSites(database, cfg.Sites); err != nil {
-				return fmt.Errorf("ensuring sites: %w", err)
-			}
-
-			posts := models.NewPostStore(database)
-			session := auth.NewSessionManager(cfg.SessionSecret, !cfg.Dev)
-
-			srv, err := server.New(cfg, posts, session)
-			if err != nil {
-				return err
-			}
+			srv := server.New(a.cfg, a.handler, a.registry, a.auth)
 
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 
 			go func() {
-				log.Printf("listening on %s", srv.Addr)
+				log.Printf("listening on %s (sign in as root on %s)", srv.Addr, a.cfg.PlatformHostname)
 				if err := srv.ListenAndServe(); err != nil {
 					log.Printf("server stopped: %v", err)
 				}
@@ -91,36 +73,16 @@ func rootCmd() *cobra.Command {
 
 	generate := &cobra.Command{
 		Use:   "generate",
-		Short: "Generate a static site from all content",
+		Short: "Generate a static site for every site in the database",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfgFile, _ := cmd.Flags().GetString("config")
 			outDir, _ := cmd.Flags().GetString("out")
-
-			cfg, err := config.Load(cfgFile)
+			a, err := openApp(cfgFile)
 			if err != nil {
 				return err
 			}
-			database, err := db.Open(cfg.DBDSN)
-			if err != nil {
-				return err
-			}
-			sqlDB, err := database.DB()
-			if err != nil {
-				return err
-			}
-			defer sqlDB.Close()
-
-			if err := models.EnsureSites(database, cfg.Sites); err != nil {
-				return fmt.Errorf("ensuring sites: %w", err)
-			}
-
-			posts := models.NewPostStore(database)
-			session := auth.NewSessionManager(cfg.SessionSecret, !cfg.Dev)
-			h, err := handlers.New(cfg.Sites, posts, session, cfg.Dev, cfg.GlobalAdminPasswordHash)
-			if err != nil {
-				return err
-			}
-			return h.Generate(outDir)
+			defer a.close()
+			return a.handler.Generate(outDir)
 		},
 	}
 	generate.Flags().String("config", "", "config file (default: ntx.toml)")
@@ -128,7 +90,7 @@ func rootCmd() *cobra.Command {
 
 	hashPw := &cobra.Command{
 		Use:   "hash-password",
-		Short: "Bcrypt a password for ntx.toml",
+		Short: "Bcrypt a password for ntx.toml's root_password_hash",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var pw string
 			if term.IsTerminal(int(os.Stdin.Fd())) {
@@ -222,6 +184,57 @@ themes_path        = "./themes"    # one folder per theme: <name>/templates, <na
 platform_hostname  = "localhost"   # where root signs in before any site exists
 root_password_hash = ""            # required: bcrypt hash (ntx hash-password)
 `
+
+// app is the wired-up application shared by serve and generate.
+type app struct {
+	cfg      *config.Config
+	registry *sitereg.Registry
+	auth     *auth.Manager
+	handler  *handlers.Handler
+	close    func()
+}
+
+func openApp(cfgFile string) (*app, error) {
+	cfg, err := config.Load(cfgFile)
+	if err != nil {
+		return nil, err
+	}
+	database, err := db.Open(cfg.DBDSN)
+	if err != nil {
+		return nil, err
+	}
+	sqlDB, err := database.DB()
+	if err != nil {
+		return nil, err
+	}
+	closeDB := func() { sqlDB.Close() }
+
+	users := models.NewUserStore(database)
+	if _, err := users.EnsureRoot(); err != nil {
+		closeDB()
+		return nil, fmt.Errorf("ensuring root user: %w", err)
+	}
+	sites := models.NewSiteStore(database)
+	reg, err := sitereg.New(sites)
+	if err != nil {
+		closeDB()
+		return nil, fmt.Errorf("loading sites: %w", err)
+	}
+	am := auth.NewManager(models.NewSessionStore(database), users, cfg.RootPasswordHash, !cfg.Dev)
+	h := handlers.New(handlers.Deps{
+		Sites:            sites,
+		Posts:            models.NewPostStore(database),
+		Users:            users,
+		Registry:         reg,
+		Auth:             am,
+		Limiter:          auth.NewLimiter(),
+		ThemesPath:       cfg.ThemesPath,
+		PlatformHostname: cfg.PlatformHostname,
+		RootPasswordHash: cfg.RootPasswordHash,
+		Dev:              cfg.Dev,
+	})
+	return &app{cfg: cfg, registry: reg, auth: am, handler: h, close: closeDB}, nil
+}
 
 // readPasswordLine reads one newline-terminated password from r for
 // the non-terminal branch of hash-password (scripted/CI use, e.g.
