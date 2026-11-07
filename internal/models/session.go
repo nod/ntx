@@ -100,3 +100,8 @@ func (s *SessionStore) Lookup(token string, now time.Time) (*Session, error) {
 func (s *SessionStore) Delete(token string) error {
 	return s.db.Where("token_hash = ?", hashToken(token)).Delete(&dbSession{}).Error
 }
+
+// DeleteForUser signs the user out everywhere.
+func (s *SessionStore) DeleteForUser(userID int64) error {
+	return s.db.Where("user_id = ?", userID).Delete(&dbSession{}).Error
+}
