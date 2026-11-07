@@ -98,7 +98,7 @@ func TestEditorForUnsavedPostPostsToCreate(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	Render(rec, "editor", map[string]any{"Post": &unsavedPost{ID: 7, Title: "Saved", Slug: "saved"}})
+	Render(rec, "editor", map[string]any{"Post": &unsavedPost{ID: 7, Title: "Saved", Slug: "saved"}, "CanDelete": true, "CanPublish": true})
 	if !strings.Contains(rec.Body.String(), `action="/admin/posts/7"`) || !strings.Contains(rec.Body.String(), `value="delete"`) {
 		t.Errorf("a saved post's form must post to its own route with delete: %s", rec.Body.String())
 	}

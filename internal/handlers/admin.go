@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/nod/ntx/internal/auth"
+	"github.com/nod/ntx/internal/authz"
 	"github.com/nod/ntx/internal/clientip"
 	"github.com/nod/ntx/internal/models"
 	"github.com/nod/ntx/internal/sitectx"
@@ -71,37 +72,116 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 }
 
+// postRow is one line of the posts list.
+type postRow struct {
+	models.Post
+	Status string // draft, published or unpublished
+	Author string
+}
+
+func postStatus(p *models.Post) string {
+	switch {
+	case p.Published:
+		return "published"
+	case p.LiveOnce():
+		return "unpublished"
+	}
+	return "draft"
+}
+
+// Posts lists every post for site admins, and only their own for
+// contributors.
 func (h *Handler) Posts(w http.ResponseWriter, r *http.Request) {
 	h.serve(w, r, func(w http.ResponseWriter, r *http.Request, site *models.Site) {
+		a := auth.ActorFrom(r)
 		ps := h.posts(site)
-		posts, err := ps.List(false)
+		var posts []models.Post
+		var err error
+		admin := authz.SiteAdmin(a)
+		if admin {
+			posts, err = ps.List(false)
+		} else {
+			posts, err = ps.ListByAuthor(a.User.ID)
+		}
 		if err != nil {
 			h.serverError(w, err)
 			return
 		}
-		total, published, drafts, tagCount, err := ps.Stats()
+		var ids []int64
+		for _, p := range posts {
+			if p.AuthorID != nil {
+				ids = append(ids, *p.AuthorID)
+			}
+		}
+		authors, err := h.d.Users.GetByIDs(ids)
 		if err != nil {
 			h.serverError(w, err)
 			return
 		}
-		h.admin(w, r, "posts", map[string]any{
-			"Posts": posts, "Total": total, "Published": published, "Drafts": drafts, "TagCount": tagCount,
-		})
+		rows := make([]postRow, len(posts))
+		for i, p := range posts {
+			rows[i] = postRow{Post: p, Status: postStatus(&p), Author: "former member"}
+			if p.AuthorID != nil {
+				if u := authors[*p.AuthorID]; u != nil {
+					rows[i].Author = u.Email
+					if u.Name != "" {
+						rows[i].Author = u.Name
+					}
+					if u.Email == "" && u.Name == "" {
+						rows[i].Author = "root"
+					}
+				}
+			}
+		}
+		data := map[string]any{"Posts": rows, "ShowStats": admin}
+		if admin {
+			total, published, drafts, tagCount, err := ps.Stats()
+			if err != nil {
+				h.serverError(w, err)
+				return
+			}
+			data["Total"], data["Published"], data["Drafts"], data["TagCount"] = total, published, drafts, tagCount
+		}
+		h.admin(w, r, "posts", data)
 	})
+}
+
+// editor renders the post editor, offering only the actions the actor is
+// allowed. A post with ID 0 is new.
+func (h *Handler) editor(w http.ResponseWriter, r *http.Request, post *models.Post, errMsg string) {
+	a := auth.ActorFrom(r)
+	data := map[string]any{"Post": post, "Error": errMsg}
+	if post == nil || post.ID == 0 {
+		data["CanPublish"], data["CanDelete"], data["ReadOnly"] = authz.CanPublishOwn(a), false, false
+	} else {
+		data["CanPublish"], data["CanDelete"], data["ReadOnly"] = authz.CanPublishPost(a, post), authz.CanDeletePost(a, post), !authz.CanEditPost(a, post)
+	}
+	h.admin(w, r, "editor", data)
+}
+
+func (h *Handler) forbidden(w http.ResponseWriter, r *http.Request) {
+	h.message(w, r, http.StatusForbidden, "not allowed", "You can't do that to this post.", "/admin/posts", "back to posts")
 }
 
 func (h *Handler) NewPost(w http.ResponseWriter, r *http.Request) {
 	h.serve(w, r, func(w http.ResponseWriter, r *http.Request, site *models.Site) {
-		h.admin(w, r, "editor", map[string]any{"Post": nil})
+		h.editor(w, r, nil, "")
 	})
 }
 
 func (h *Handler) CreatePost(w http.ResponseWriter, r *http.Request) {
 	h.serve(w, r, func(w http.ResponseWriter, r *http.Request, site *models.Site) {
+		a := auth.ActorFrom(r)
 		post := postFromForm(r)
 		post.Published = r.FormValue("action") == "publish"
+		if post.Published && !authz.CanPublishOwn(a) {
+			h.forbidden(w, r)
+			return
+		}
+		post.AuthorID = &a.User.ID
 		if err := h.posts(site).Create(post); err != nil {
-			h.admin(w, r, "editor", map[string]any{"Post": post, "Error": err.Error()})
+			post.ID = 0
+			h.editor(w, r, post, err.Error())
 			return
 		}
 		http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
@@ -114,19 +194,25 @@ func (h *Handler) EditPost(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
-		h.admin(w, r, "editor", map[string]any{"Post": post})
+		h.editor(w, r, post, "")
 	})
 }
 
+// UpdatePost applies one editor action, each gated by the role table.
 func (h *Handler) UpdatePost(w http.ResponseWriter, r *http.Request) {
 	h.serve(w, r, func(w http.ResponseWriter, r *http.Request, site *models.Site) {
 		existing, ok := h.postFromParam(w, r, site)
 		if !ok {
 			return
 		}
+		a := auth.ActorFrom(r)
 		ps := h.posts(site)
 		action := r.FormValue("action")
 		if action == "delete" {
+			if !authz.CanDeletePost(a, existing) {
+				h.forbidden(w, r)
+				return
+			}
 			if err := ps.Delete(existing.ID); err != nil {
 				h.serverError(w, err)
 				return
@@ -135,18 +221,26 @@ func (h *Handler) UpdatePost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Every other action saves the form's content too.
+		if !authz.CanEditPost(a, existing) {
+			h.forbidden(w, r)
+			return
+		}
 		updated := postFromForm(r)
 		updated.ID = existing.ID
 		switch action {
-		case "publish":
-			updated.Published = true
-		case "unpublish":
-			updated.Published = false
+		case "publish", "unpublish":
+			if !authz.CanPublishPost(a, existing) {
+				h.forbidden(w, r)
+				return
+			}
+			updated.Published = action == "publish"
 		default: // "save" keeps the current state
 			updated.Published = existing.Published
 		}
 		if err := ps.Update(updated); err != nil {
-			h.admin(w, r, "editor", map[string]any{"Post": updated, "Error": err.Error()})
+			updated.AuthorID, updated.FirstPublishedAt = existing.AuthorID, existing.FirstPublishedAt
+			h.editor(w, r, updated, err.Error())
 			return
 		}
 		http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
@@ -154,7 +248,8 @@ func (h *Handler) UpdatePost(w http.ResponseWriter, r *http.Request) {
 }
 
 // postFromParam loads the {id} post from site, writing a 404 or 500 and
-// returning ok=false if it can't.
+// returning ok=false if it can't. A post the actor may not see is a 404,
+// so contributors can't probe for others' drafts.
 func (h *Handler) postFromParam(w http.ResponseWriter, r *http.Request, site *models.Site) (*models.Post, bool) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
@@ -166,7 +261,7 @@ func (h *Handler) postFromParam(w http.ResponseWriter, r *http.Request, site *mo
 		h.serverError(w, err)
 		return nil, false
 	}
-	if post == nil {
+	if post == nil || !authz.CanSeePost(auth.ActorFrom(r), post) {
 		h.notFound(w)
 		return nil, false
 	}

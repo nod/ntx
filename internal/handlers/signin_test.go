@@ -234,4 +234,3 @@ func TestLoginPageShowsProviderButton(t *testing.T) {
 		t.Fatal("platform login page shows a provider button")
 	}
 }
-

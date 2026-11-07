@@ -223,8 +223,10 @@ func (h *Handler) adminStatus(w http.ResponseWriter, r *http.Request, status int
 		data = map[string]any{}
 	}
 	site := sitectx.From(r)
-	data["Actor"] = auth.ActorFrom(r)
+	actor := auth.ActorFrom(r)
+	data["Actor"] = actor
 	data["Site"] = site
+	data["IsSiteAdmin"] = site != nil && authz.SiteAdmin(actor)
 	if site != nil {
 		data["ProviderName"] = providerName(site.ProviderType)
 	} else {
@@ -273,6 +275,25 @@ func (h *Handler) RequireSiteAdmin(next http.Handler) http.Handler {
 		case a == nil:
 			http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 		case !authz.SiteAdmin(a):
+			http.Error(w, "Forbidden", http.StatusForbidden)
+		default:
+			next.ServeHTTP(w, r)
+		}
+	})
+}
+
+// RequireMember gates the pages every member of the site may open (posts):
+// anonymous requests go to sign-in, the platform host has none, and a
+// signed-in actor with no part in this site gets 403.
+func (h *Handler) RequireMember(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		a := auth.ActorFrom(r)
+		switch {
+		case sitectx.From(r) == nil:
+			h.notFound(w)
+		case a == nil:
+			http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+		case !authz.SiteMember(a):
 			http.Error(w, "Forbidden", http.StatusForbidden)
 		default:
 			next.ServeHTTP(w, r)

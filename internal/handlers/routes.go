@@ -27,13 +27,19 @@ func (h *Handler) Mount(r chi.Router) {
 	r.Get("/auth/callback", h.AuthCallback)
 	r.Get("/invite/{token}", h.InvitePage)
 
+	// Posts: any member; each action is checked against authz in the
+	// handler.
 	r.Group(func(r chi.Router) {
-		r.Use(h.RequireSiteAdmin)
+		r.Use(h.RequireMember)
 		r.Get("/admin/posts", h.Posts)
 		r.Get("/admin/posts/new", h.NewPost)
 		r.Post("/admin/posts", h.CreatePost)
 		r.Get("/admin/posts/{id}/edit", h.EditPost)
 		r.Post("/admin/posts/{id}", h.UpdatePost)
+	})
+
+	r.Group(func(r chi.Router) {
+		r.Use(h.RequireSiteAdmin)
 		r.Get("/admin/settings", h.Settings)
 		r.Post("/admin/settings", h.SettingsPost)
 	})
