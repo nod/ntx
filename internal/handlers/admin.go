@@ -35,15 +35,18 @@ func (h *Handler) LoginForm(w http.ResponseWriter, r *http.Request) {
 // guesses (the IP is the real client's; see clientip).
 func (h *Handler) LoginPost(w http.ResponseWriter, r *http.Request) {
 	ip := clientip.IP(r)
-	if h.d.Limiter.Blocked(ip) {
+	// Reserve counts the attempt as a failure before the password check,
+	// so parallel guesses can't all get past the budget; a success gives
+	// it back.
+	if !h.d.Limiter.Reserve(ip) {
 		h.admin(w, r, "login", map[string]any{"Error": "Too many attempts. Try again later."})
 		return
 	}
 	if r.FormValue("username") != "root" || auth.CheckPassword(h.d.RootPasswordHash, r.FormValue("password")) != nil {
-		h.d.Limiter.Fail(ip)
 		h.admin(w, r, "login", map[string]any{"Error": "Invalid username or password."})
 		return
 	}
+	h.d.Limiter.Release(ip)
 	root, err := h.d.Users.EnsureRoot()
 	if err != nil {
 		h.serverError(w, err)

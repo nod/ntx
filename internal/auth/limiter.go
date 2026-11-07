@@ -41,16 +41,31 @@ func (l *Limiter) recent(ip string) []time.Time {
 	return kept
 }
 
-// Blocked reports whether ip has used up its failure budget.
-func (l *Limiter) Blocked(ip string) bool {
+// Reserve admits one sign-in attempt from ip if it is under budget, and
+// counts it as a failure straight away. Checking and counting are one
+// locked step, so a burst of parallel attempts can't all slip past the
+// check while their password checks run. Call Release if the attempt
+// succeeds.
+func (l *Limiter) Reserve(ip string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return len(l.recent(ip)) >= limitFailures
+	recent := l.recent(ip)
+	if len(recent) >= limitFailures {
+		return false
+	}
+	l.failures[ip] = append(recent, l.now())
+	return true
 }
 
-// Fail records one failed attempt from ip.
-func (l *Limiter) Fail(ip string) {
+// Release gives back the attempt most recently reserved for ip: it
+// succeeded, so it isn't a failure.
+func (l *Limiter) Release(ip string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.failures[ip] = append(l.recent(ip), l.now())
+	if f := l.failures[ip]; len(f) > 0 {
+		l.failures[ip] = f[:len(f)-1]
+		if len(l.failures[ip]) == 0 {
+			delete(l.failures, ip)
+		}
+	}
 }
