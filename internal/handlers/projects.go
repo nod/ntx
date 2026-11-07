@@ -12,11 +12,12 @@ import (
 // section slug across all sites — which site's Section content applies
 // is decided here, per request, not at route-registration time).
 func (h *Handler) SectionPage(w http.ResponseWriter, r *http.Request, sectionSlug string) {
-	sh := h.current(r)
-	if sh == nil {
-		h.notFound(w)
-		return
-	}
+	h.serve(w, r, func(w http.ResponseWriter, r *http.Request, sh *siteHandler) {
+		h.sectionPage(w, r, sh, sectionSlug)
+	})
+}
+
+func (h *Handler) sectionPage(w http.ResponseWriter, r *http.Request, sh *siteHandler, sectionSlug string) {
 
 	var sec *config.Section
 	for i := range sh.site.Sections {
@@ -63,5 +64,5 @@ func (h *Handler) SectionPage(w http.ResponseWriter, r *http.Request, sectionSlu
 		data["Title"] = page.Title
 	}
 
-	h.render(w, r, tmplName, data)
+	h.render(w, sh, tmplName, data)
 }

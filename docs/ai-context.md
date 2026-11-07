@@ -117,15 +117,19 @@ into one entry.
 ### siteHandler and the Handler map
 
 `Handler` holds one `siteHandler` per configured site, in a
-`map[int64]*siteHandler` keyed by `Site.ID`. A `siteHandler` bundles everything
-one site's request needs: its `config.Site`, a `*models.PostStore` already
-scoped via `ForSite(site.ID)`, and its own `TemplateCache` over that site's
-`template_path`.
+`map[int64]*siteHandler` keyed by `Site.ID` (plus the same handlers in config
+order, which `Generate` walks). A `siteHandler` bundles everything one site's
+request needs: its `config.Site`, a `*models.PostStore` already scoped via
+`ForSite(site.ID)`, and the `TemplateCache` for its `template_path`. Sites with
+the same `template_path` share one cache, so the default directory is parsed
+once however many sites use it.
 
-`h.current(r)` reads the resolved site from `sitectx` and looks up its
-`siteHandler`; a nil result means no site was resolved and callers treat it as a
-404. Every handler starts there — a handler that reaches for a store or a
-template any other way is a tenant-isolation bug.
+Every exported handler is a one-line `h.serve(w, r, h.xxx)`: `serve` reads the
+resolved site from `sitectx`, looks up its `siteHandler`, and calls the
+unexported body with it — or returns a bare 404 if no site was resolved. That is
+the only place an unresolved site is handled. Bodies take the `*siteHandler` as
+a parameter; a handler that reaches for a store or a template any other way is
+a tenant-isolation bug.
 
 ### TemplateCache
 
@@ -339,10 +343,12 @@ The `generate` CLI command (`main.go`) accepts `--out` (default `./out`) and `--
 
 ## How to add a new hard-coded route
 
-1. Add a handler method on `*Handler` in `internal/handlers/`.
+1. Add an exported method on `*Handler` in `internal/handlers/` that calls
+   `h.serve(w, r, h.yourBody)`, and write the body as
+   `func (h *Handler) yourBody(w http.ResponseWriter, r *http.Request, sh *siteHandler)`.
 2. Register the route in `internal/server/server.go`.
 3. Add the template at the appropriate path under `template_path`.
-4. Call `h.render(w, r, "path/to/template.html", data)` — site data is merged automatically.
+4. Call `h.render(w, sh, "path/to/template.html", data)` — site data is merged automatically.
 
 Do not add a new route for content that fits the `[[section]]` pattern — use config instead.
 

@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -204,6 +206,81 @@ func TestGenerateRunsSitesInConfigOrder(t *testing.T) {
 	for _, key := range []string{"a", "b", "c"} {
 		if _, err := os.Stat(filepath.Join(outDir, key, "index.html")); err != nil {
 			t.Errorf("site %q precedes the failing site in config, so it must have been generated: %v", key, err)
+		}
+	}
+}
+
+// TestSitesSharingATemplatePathShareOneCache: with N sites on the default
+// template_path, parsing the tree N times and holding N identical copies is
+// pure waste. Sites that point at the same directory share one cache; a
+// site that overrides template_path gets its own.
+func TestSitesSharingATemplatePathShareOneCache(t *testing.T) {
+	database := newTestDB(t)
+	shared := t.TempDir()
+	writeTemplates(t, shared)
+	own := t.TempDir()
+	writeTemplates(t, own)
+
+	hash, _ := auth.HashPassword("testpass")
+	sites := []config.Site{
+		{Key: "a", SiteURL: "a.example.com", TemplatePath: shared, StaticPath: shared, AdminPasswordHash: hash},
+		{Key: "b", SiteURL: "b.example.com", TemplatePath: shared + "/", StaticPath: shared, AdminPasswordHash: hash},
+		{Key: "c", SiteURL: "c.example.com", TemplatePath: own, StaticPath: own, AdminPasswordHash: hash},
+	}
+	if err := models.EnsureSites(database, sites); err != nil {
+		t.Fatal(err)
+	}
+	session := auth.NewSessionManager("testsecretkey12345678901234567890", false)
+	// dev=false so the caches actually parse at construction.
+	h, err := New(sites, models.NewPostStore(database), session, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a, b, c := h.sites[sites[0].ID].templates, h.sites[sites[1].ID].templates, h.sites[sites[2].ID].templates
+	if a != b {
+		t.Error("sites a and b use the same template_path and should share one TemplateCache")
+	}
+	if a == c {
+		t.Error("site c overrides template_path and must get its own TemplateCache")
+	}
+}
+
+// TestHandlersNotFoundWithoutResolvedSite pins the one behaviour every
+// handler shares: a request carrying no resolved site is a 404 -- never a
+// panic, never another site's content.
+func TestHandlersNotFoundWithoutResolvedSite(t *testing.T) {
+	database := newTestDB(t)
+	dir := t.TempDir()
+	writeTemplates(t, dir)
+	hash, _ := auth.HashPassword("testpass")
+	sites := []config.Site{{Key: "a", SiteURL: "a.example.com", TemplatePath: dir, StaticPath: dir, AdminPasswordHash: hash}}
+	if err := models.EnsureSites(database, sites); err != nil {
+		t.Fatal(err)
+	}
+	session := auth.NewSessionManager("testsecretkey12345678901234567890", false)
+	h, err := New(sites, models.NewPostStore(database), session, true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, fn := range map[string]http.HandlerFunc{
+		"Home":            h.Home,
+		"BlogIndex":       h.BlogIndex,
+		"BlogPost":        h.BlogPost,
+		"AdminLogin":      h.AdminLogin,
+		"AdminLoginPost":  h.AdminLoginPost,
+		"AdminPosts":      h.AdminPosts,
+		"AdminNewPost":    h.AdminNewPost,
+		"AdminCreatePost": h.AdminCreatePost,
+		"AdminEditPost":   h.AdminEditPost,
+		"AdminUpdatePost": h.AdminUpdatePost,
+		"SectionPage":     func(w http.ResponseWriter, r *http.Request) { h.SectionPage(w, r, "projects") },
+	} {
+		rec := httptest.NewRecorder()
+		fn(rec, httptest.NewRequest(http.MethodGet, "/", nil)) // no sitectx attached
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s: expected 404 with no resolved site, got %d", name, rec.Code)
 		}
 	}
 }

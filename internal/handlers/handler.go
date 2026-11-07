@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"bytes"
 	"fmt"
 	"html/template"
 	"log"
@@ -94,9 +93,8 @@ func templateFuncs() template.FuncMap {
 
 // siteHandler bundles the per-site resources a request needs once its
 // site has been resolved: this site's config, its scoped post store, and
-// its own template cache (which points at the shared global
-// template/static paths if the site didn't override them — see Task 3's
-// config defaulting).
+// the template cache for its template_path (shared with every other site
+// using the same directory).
 type siteHandler struct {
 	site      config.Site
 	posts     *models.PostStore
@@ -140,10 +138,19 @@ func New(sites []config.Site, posts *models.PostStore, session *auth.SessionMana
 		sites:           make(map[int64]*siteHandler, len(sites)),
 		globalAdminHash: globalAdminHash,
 	}
+	// Sites usually share the global template_path; parse each distinct
+	// directory once and share the (read-only) cache between them.
+	caches := make(map[string]*TemplateCache)
 	for _, site := range sites {
-		tc, err := NewTemplateCache(site.TemplatePath, dev)
-		if err != nil {
-			return nil, fmt.Errorf("loading templates for site %q: %w", site.Key, err)
+		dir := filepath.Clean(site.TemplatePath)
+		tc, ok := caches[dir]
+		if !ok {
+			var err error
+			tc, err = NewTemplateCache(dir, dev)
+			if err != nil {
+				return nil, fmt.Errorf("loading templates for site %q: %w", site.Key, err)
+			}
+			caches[dir] = tc
 		}
 		sh := &siteHandler{
 			site:      site,
@@ -156,40 +163,31 @@ func New(sites []config.Site, posts *models.PostStore, session *auth.SessionMana
 	return h, nil
 }
 
-// current resolves the siteHandler for the request's already-resolved
-// site (set by server's Host-routing middleware via sitectx). Returns
-// nil if no site was resolved, which callers treat as a 404.
-func (h *Handler) current(r *http.Request) *siteHandler {
+// serve resolves the request's site -- already attached via sitectx by
+// server's Host-routing middleware -- and hands its siteHandler to fn. It is
+// the one place handlers deal with an unresolved site: a bare 404.
+func (h *Handler) serve(w http.ResponseWriter, r *http.Request, fn func(http.ResponseWriter, *http.Request, *siteHandler)) {
 	site := sitectx.From(r)
 	if site == nil {
-		return nil
-	}
-	return h.sites[site.ID]
-}
-
-func (h *Handler) render(w http.ResponseWriter, r *http.Request, name string, data map[string]interface{}) {
-	sh := h.current(r)
-	if sh == nil {
 		h.notFound(w)
 		return
 	}
-	t, err := sh.templates.Get(name)
+	sh, ok := h.sites[site.ID]
+	if !ok {
+		h.notFound(w)
+		return
+	}
+	fn(w, r, sh)
+}
+
+func (h *Handler) render(w http.ResponseWriter, sh *siteHandler, name string, data map[string]interface{}) {
+	content, err := h.renderToBytes(sh, name, data)
 	if err != nil {
 		h.serverError(w, err)
 		return
 	}
-	merged := sh.siteData()
-	for k, v := range data {
-		merged[k] = v
-	}
-	var buf bytes.Buffer
-	if err := t.Execute(&buf, merged); err != nil {
-		log.Printf("render %s: %v", name, err)
-		h.serverError(w, err)
-		return
-	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(buf.Bytes())
+	w.Write(content)
 }
 
 func (h *Handler) serverError(w http.ResponseWriter, err error) {

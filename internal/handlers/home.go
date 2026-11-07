@@ -5,5 +5,9 @@ import (
 )
 
 func (h *Handler) Home(w http.ResponseWriter, r *http.Request) {
-	h.render(w, r, "home.html", nil)
+	h.serve(w, r, h.home)
+}
+
+func (h *Handler) home(w http.ResponseWriter, r *http.Request, sh *siteHandler) {
+	h.render(w, sh, "home.html", nil)
 }

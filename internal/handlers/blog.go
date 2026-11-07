@@ -23,12 +23,10 @@ func renderMarkdown(src string) (template.HTML, error) {
 }
 
 func (h *Handler) BlogIndex(w http.ResponseWriter, r *http.Request) {
-	sh := h.current(r)
-	if sh == nil {
-		h.notFound(w)
-		return
-	}
+	h.serve(w, r, h.blogIndex)
+}
 
+func (h *Handler) blogIndex(w http.ResponseWriter, r *http.Request, sh *siteHandler) {
 	tag := r.URL.Query().Get("tag")
 
 	var posts interface{}
@@ -50,7 +48,7 @@ func (h *Handler) BlogIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.render(w, r, "blog/index.html", map[string]interface{}{
+	h.render(w, sh, "blog/index.html", map[string]interface{}{
 		"Posts":     posts,
 		"AllTags":   allTags,
 		"ActiveTag": tag,
@@ -58,12 +56,10 @@ func (h *Handler) BlogIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) BlogPost(w http.ResponseWriter, r *http.Request) {
-	sh := h.current(r)
-	if sh == nil {
-		h.notFound(w)
-		return
-	}
+	h.serve(w, r, h.blogPost)
+}
 
+func (h *Handler) blogPost(w http.ResponseWriter, r *http.Request, sh *siteHandler) {
 	slug := chi.URLParam(r, "slug")
 	post, err := sh.posts.GetBySlug(slug)
 	if err != nil {
@@ -81,7 +77,7 @@ func (h *Handler) BlogPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.render(w, r, "blog/post.html", map[string]interface{}{
+	h.render(w, sh, "blog/post.html", map[string]interface{}{
 		"Post":     post,
 		"Rendered": rendered,
 	})
