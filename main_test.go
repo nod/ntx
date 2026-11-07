@@ -73,3 +73,15 @@ func TestReadPasswordLineAcceptsNewlineTerminatedPassword(t *testing.T) {
 		t.Errorf("expected pw = %q, got %q", "testpass", pw)
 	}
 }
+
+// Root's password guards every site, so an empty one -- someone pressing
+// Enter at the prompt -- must be refused, not hashed.
+func TestHashRootPasswordRejectsEmpty(t *testing.T) {
+	if _, err := hashRootPassword(""); err == nil {
+		t.Error("an empty root password must be refused")
+	}
+	hash, err := hashRootPassword("s3cret")
+	if err != nil || !strings.HasPrefix(hash, "$2") {
+		t.Errorf("a real password must hash: %q, %v", hash, err)
+	}
+}

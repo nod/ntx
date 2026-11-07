@@ -108,7 +108,7 @@ func rootCmd() *cobra.Command {
 					return err
 				}
 			}
-			hash, err := auth.HashPassword(pw)
+			hash, err := hashRootPassword(pw)
 			if err != nil {
 				return err
 			}
@@ -140,7 +140,7 @@ func rootCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				hash, err = auth.HashPassword(string(pw))
+				hash, err = hashRootPassword(string(pw))
 				if err != nil {
 					return err
 				}
@@ -234,6 +234,15 @@ func openApp(cfgFile string) (*app, error) {
 		Dev:              cfg.Dev,
 	})
 	return &app{cfg: cfg, registry: reg, auth: am, handler: h, close: closeDB}, nil
+}
+
+// hashRootPassword bcrypts a password typed for root_password_hash,
+// refusing an empty one: root's password guards every site.
+func hashRootPassword(pw string) (string, error) {
+	if pw == "" {
+		return "", fmt.Errorf("the password must not be empty")
+	}
+	return auth.HashPassword(pw)
 }
 
 // readPasswordLine reads one newline-terminated password from r for
