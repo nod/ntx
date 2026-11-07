@@ -9,24 +9,37 @@ import (
 	"path/filepath"
 )
 
+// Generate renders every configured site's static output into its own
+// <outDir>/<site.key>/ subdirectory, in config order, stopping at the
+// first site that fails.
 func (h *Handler) Generate(outDir string) error {
+	for _, sh := range h.ordered {
+		siteOut := filepath.Join(outDir, sh.site.Key)
+		if err := h.generateSite(sh, siteOut); err != nil {
+			return fmt.Errorf("generating site %q: %w", sh.site.Key, err)
+		}
+	}
+	return nil
+}
+
+func (h *Handler) generateSite(sh *siteHandler, outDir string) error {
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return fmt.Errorf("creating output dir: %w", err)
 	}
 
-	if err := h.genPage(outDir, "/", "home.html", nil); err != nil {
+	if err := h.genPage(sh, outDir, "/", "home.html", nil); err != nil {
 		return err
 	}
 
-	posts, err := h.posts.List(true)
+	posts, err := sh.posts.List(true)
 	if err != nil {
 		return fmt.Errorf("listing posts: %w", err)
 	}
-	allTags, err := h.posts.AllTags()
+	allTags, err := sh.posts.AllTags()
 	if err != nil {
 		return fmt.Errorf("listing tags: %w", err)
 	}
-	if err := h.genPage(outDir, "/blog", "blog/index.html", map[string]interface{}{
+	if err := h.genPage(sh, outDir, "/blog", "blog/index.html", map[string]interface{}{
 		"Posts":     posts,
 		"AllTags":   allTags,
 		"ActiveTag": "",
@@ -40,7 +53,7 @@ func (h *Handler) Generate(outDir string) error {
 		if err != nil {
 			return fmt.Errorf("rendering markdown for %s: %w", post.Slug, err)
 		}
-		if err := h.genPage(outDir, "/blog/"+post.Slug, "blog/post.html", map[string]interface{}{
+		if err := h.genPage(sh, outDir, "/blog/"+post.Slug, "blog/post.html", map[string]interface{}{
 			"Post":     &post,
 			"Rendered": rendered,
 		}); err != nil {
@@ -48,10 +61,10 @@ func (h *Handler) Generate(outDir string) error {
 		}
 	}
 
-	for _, sec := range h.cfg.Sections {
+	for _, sec := range sh.site.Sections {
 		for _, pg := range sec.Pages {
 			tmplName := "sections/" + sec.Slug + "/" + pg.Slug + "/index.html"
-			if !h.templates.Has(tmplName) {
+			if !sh.templates.Has(tmplName) {
 				log.Printf("warning: template %s not found, skipping /%s/%s", tmplName, sec.Slug, pg.Slug)
 				continue
 			}
@@ -68,13 +81,13 @@ func (h *Handler) Generate(outDir string) error {
 			if pg.Title != "" {
 				data["Title"] = pg.Title
 			}
-			if err := h.genPage(outDir, "/"+sec.Slug+"/"+pg.Slug, tmplName, data); err != nil {
+			if err := h.genPage(sh, outDir, "/"+sec.Slug+"/"+pg.Slug, tmplName, data); err != nil {
 				return err
 			}
 		}
 	}
 
-	if err := copyDir(h.cfg.StaticPath, filepath.Join(outDir, "static")); err != nil {
+	if err := copyDir(sh.site.StaticPath, filepath.Join(outDir, "static")); err != nil {
 		return fmt.Errorf("copying static files: %w", err)
 	}
 	log.Printf("copied static/ → %s/static/", outDir)
@@ -82,8 +95,8 @@ func (h *Handler) Generate(outDir string) error {
 	return nil
 }
 
-func (h *Handler) genPage(outDir, urlPath, tmplName string, data map[string]interface{}) error {
-	content, err := h.renderToBytes(tmplName, data)
+func (h *Handler) genPage(sh *siteHandler, outDir, urlPath, tmplName string, data map[string]interface{}) error {
+	content, err := h.renderToBytes(sh, tmplName, data)
 	if err != nil {
 		return fmt.Errorf("rendering %s: %w", urlPath, err)
 	}
@@ -101,16 +114,16 @@ func (h *Handler) genPage(outDir, urlPath, tmplName string, data map[string]inte
 	if err := os.WriteFile(filePath, content, 0644); err != nil {
 		return fmt.Errorf("writing %s: %w", filePath, err)
 	}
-	log.Printf("generated %s", urlPath)
+	log.Printf("generated %s%s", sh.site.Key, urlPath)
 	return nil
 }
 
-func (h *Handler) renderToBytes(name string, data map[string]interface{}) ([]byte, error) {
-	t, err := h.templates.Get(name)
+func (h *Handler) renderToBytes(sh *siteHandler, name string, data map[string]interface{}) ([]byte, error) {
+	t, err := sh.templates.Get(name)
 	if err != nil {
 		return nil, err
 	}
-	merged := h.siteData()
+	merged := sh.siteData()
 	for k, v := range data {
 		merged[k] = v
 	}

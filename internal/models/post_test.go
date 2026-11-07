@@ -6,7 +6,7 @@ import (
 	"github.com/nod/ntx/internal/db"
 )
 
-func newTestDB(t *testing.T) *PostStore {
+func newTestStores(t *testing.T) (siteA, siteB *PostStore) {
 	t.Helper()
 	database, err := db.Open("sqlite://:memory:")
 	if err != nil {
@@ -16,7 +16,23 @@ func newTestDB(t *testing.T) *PostStore {
 		sqlDB, _ := database.DB()
 		sqlDB.Close()
 	})
-	return NewPostStore(database)
+	// The 001->002 migration backfills exactly one site ("default", id 1).
+	// posts.site_id/tags.site_id carry a NOT NULL FK to sites(id), enforced
+	// because db.Open turns on PRAGMA foreign_keys -- so site 2 needs a real
+	// row too, or every write through ForSite(2) below fails FK validation.
+	if err := database.Exec(
+		"INSERT INTO sites (key, hostname) VALUES (?, ?)", "site-b", "site-b.example.com",
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+	raw := NewPostStore(database)
+	return raw.ForSite(1), raw.ForSite(2)
+}
+
+func newTestDB(t *testing.T) *PostStore {
+	t.Helper()
+	s, _ := newTestStores(t)
+	return s
 }
 
 func TestCreateAndGetBySlug(t *testing.T) {
@@ -213,5 +229,132 @@ func TestTagDeduplication(t *testing.T) {
 	}
 	if len(all) != 1 {
 		t.Errorf("expected 1 unique tag, got %d: %v", len(all), all)
+	}
+}
+
+// Multi-tenant isolation tests
+
+func TestSlugUniquePerSiteNotGlobally(t *testing.T) {
+	siteA, siteB := newTestStores(t)
+
+	if err := siteA.Create(&Post{Slug: "same-slug", Title: "A's post", Body: "."}); err != nil {
+		t.Fatal(err)
+	}
+	if err := siteB.Create(&Post{Slug: "same-slug", Title: "B's post", Body: "."}); err != nil {
+		t.Fatalf("expected same slug to be valid in a different site, got: %v", err)
+	}
+
+	if err := siteA.Create(&Post{Slug: "same-slug", Title: "A's second post", Body: "."}); err == nil {
+		t.Error("expected duplicate slug within the same site to fail")
+	}
+}
+
+func TestForSiteIsolatesReads(t *testing.T) {
+	siteA, siteB := newTestStores(t)
+
+	if err := siteA.Create(&Post{Slug: "a-only", Title: "A Only", Body: ".", Published: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := siteB.GetBySlug("a-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Error("site B should not see site A's post")
+	}
+
+	all, err := siteB.List(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 0 {
+		t.Errorf("expected site B to have 0 posts, got %d", len(all))
+	}
+}
+
+// TestTagNameUniquePerSiteNotGlobally asserts that two sites using the same
+// tag name each own their own tags row.
+//
+// The row count is the load-bearing assertion. Counting what each site's
+// AllTags() returns is not enough: if resolveTags dropped its site_id
+// condition, site B's post would attach site A's existing tag row, and both
+// sites would still report exactly 1 tag named "shared" -- a live
+// cross-tenant association that per-site AllTags() cannot see. Only the
+// "2 rows named shared" check distinguishes two private rows from one shared
+// row, so that is what catches the mutation.
+func TestTagNameUniquePerSiteNotGlobally(t *testing.T) {
+	siteA, siteB := newTestStores(t)
+
+	if err := siteA.Create(&Post{Slug: "a1", Title: "A1", Body: ".", Tags: []string{"shared"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := siteB.Create(&Post{Slug: "b1", Title: "B1", Body: ".", Tags: []string{"shared"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	aTags, err := siteA.AllTags()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(aTags) != 1 || aTags[0] != "shared" {
+		t.Errorf("expected site A to see exactly the tag \"shared\", got %v", aTags)
+	}
+
+	bTags, err := siteB.AllTags()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bTags) != 1 || bTags[0] != "shared" {
+		t.Errorf("expected site B to see exactly the tag \"shared\", got %v", bTags)
+	}
+
+	var sharedRows int64
+	if err := siteA.db.Model(&dbTag{}).Where("name = ?", "shared").Count(&sharedRows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if sharedRows != 2 {
+		t.Errorf("expected 2 tags rows named \"shared\" (one per site), got %d -- "+
+			"1 means the two sites are sharing a single tag row across the tenant boundary", sharedRows)
+	}
+
+	var bTagSiteID int64
+	if err := siteA.db.Model(&dbTag{}).
+		Select("tags.site_id").
+		Joins("JOIN post_tags ON post_tags.tag_id = tags.id").
+		Joins("JOIN posts ON posts.id = post_tags.post_id AND posts.slug = ?", "b1").
+		Scan(&bTagSiteID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if bTagSiteID != 2 {
+		t.Errorf("site B's post is associated with a tag owned by site %d, want site 2", bTagSiteID)
+	}
+}
+
+func TestUpdateCannotCrossSiteBoundary(t *testing.T) {
+	siteA, siteB := newTestStores(t)
+
+	p := &Post{Slug: "a-owned", Title: "A's Post", Body: ".", Tags: []string{"original"}}
+	if err := siteA.Create(p); err != nil {
+		t.Fatal(err)
+	}
+
+	hijack := &Post{ID: p.ID, Slug: "a-owned", Title: "Hijacked", Body: "hijacked body", Published: true, Tags: []string{"hijacked"}}
+	if err := siteB.Update(hijack); err == nil {
+		t.Error("expected site B updating site A's post id to fail")
+	}
+
+	got, err := siteA.GetBySlug("a-owned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("expected site A's post to still exist")
+	}
+	if got.Title != "A's Post" {
+		t.Errorf("title was modified by a cross-site update: got %q", got.Title)
+	}
+	if len(got.Tags) != 1 || got.Tags[0] != "original" {
+		t.Errorf("tags were modified by a cross-site update: got %v", got.Tags)
 	}
 }

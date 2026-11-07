@@ -6,6 +6,13 @@ This document describes the ntx codebase for AI assistants. It covers architectu
 
 A self-hosted personal site server written in Go. It is not a framework or a CMS — it is a single binary that serves a blog, content sections, and an admin UI, configured entirely via `ntx.toml` and HTML templates you supply. The site that runs on nerdtx.net is one deployment of ntx.
 
+**ntx is multi-tenant.** One process serves one or more websites, each declared
+as a `[[site]]` block in `ntx.toml` and selected per request by matching the
+HTTP `Host` header against that site's `site_url`. Posts, tags, templates,
+static files and admin sessions are all scoped to a site. Any code touching
+content must stay inside the resolved site's scope; that is the invariant this
+codebase exists to protect.
+
 ## Module and Go version
 
 ```
@@ -19,12 +26,14 @@ go 1.26.4
 main.go                        # CLI entrypoint (cobra)
 ntx.toml                       # local dev config (not committed in production)
 internal/
-  config/config.go             # Config struct, viper load, validation
-  db/db.go                     # SQLite init and migrations
-  db/migrations/               # .sql migration files
-  auth/auth.go                 # bcrypt password check, session management
-  models/post.go               # PostStore: CRUD for blog posts
-  handlers/handler.go          # TemplateCache, Handler struct, render(), renderToBytes()
+  config/config.go             # Config + Site structs, viper load, validation
+  db/db.go                     # SQLite/Postgres init and migrations
+  db/migrations/               # .sql migration files (sqlite/ and postgres/)
+  auth/auth.go                 # bcrypt password check, site-scoped sessions
+  sitectx/sitectx.go           # carries the resolved *config.Site on the request context
+  models/site.go               # dbSite, EnsureSites: upserts sites, assigns Site.ID
+  models/post.go               # PostStore: site-scoped CRUD for blog posts
+  handlers/handler.go          # TemplateCache, siteHandler, Handler struct, render()
   handlers/home.go             # GET /
   handlers/blog.go             # GET /blog, GET /blog/{slug}
   handlers/projects.go         # GET /{section}/{page} (content sections)
@@ -41,20 +50,33 @@ docs/                          # documentation
 
 Loaded by viper from `ntx.toml`, then env vars (`NTX_*`), then defaults.
 
+Process-global settings live at the root of the file; per-site settings live in
+`[[site]]` blocks, with sections nested as `[[site.section]]`.
+
 ```go
 type Config struct {
-    StaticPath        string    // static_path
-    DBPath            string    // db_path
-    Port              int       // port (default 8080)
-    TemplatePath      string    // template_path (default ./templates)
-    AboutSlug         string    // about_slug — /about redirects to /blog/<slug>
-    AdminPasswordHash string    // required: bcrypt hash
-    SessionSecret     string    // required: min 32 chars
-    Dev               bool      // dev mode: re-parse templates on every request
-    SiteName          string    // site_name
-    SiteURL           string    // site_url
+    BindAddr                string // bind_addr ("" = localhost only)
+    Port                    int    // port (default 8080)
+    DBDSN                   string // db_dsn (default sqlite://./ntx.db)
+    SessionSecret           string // required: min 32 chars
+    Dev                     bool   // dev mode: re-parse templates on every request
+    TemplatePath            string // template_path (default ./templates) — global default
+    StaticPath              string // static_path (default ./static) — global default
+    GlobalAdminPasswordHash string // optional: bcrypt hash valid on every site
+    Sites                   []Site // [[site]] blocks — at least one required
+}
+
+type Site struct {
+    ID                int64     // NOT from TOML: assigned by models.EnsureSites at boot
+    Key               string    // key — required, unique; the stable content owner id
+    SiteURL           string    // site_url — required, unique; the Host routing key
+    SiteName          string    // site_name (default "ntx")
     SiteDescription   string    // site_description
-    Sections          []Section // [[section]] blocks
+    AboutSlug         string    // about_slug (default "about")
+    AdminPasswordHash string    // required: bcrypt hash
+    TemplatePath      string    // template_path — defaults to Config.TemplatePath at load
+    StaticPath        string    // static_path — defaults to Config.StaticPath at load
+    Sections          []Section // [[site.section]] blocks
 }
 
 type Section struct {
@@ -71,9 +93,43 @@ type SectionPage struct {
 }
 ```
 
-Validation in `Load()` rejects missing `session_secret` (< 32 chars) and missing `admin_password_hash`.
+Validation in `Load()` rejects: a missing or under-32-char `session_secret`; zero
+`[[site]]` blocks; a site with no `key` or no `site_url`; a duplicate `key` or
+`site_url` (case-insensitive) across sites; a `key` that is not
+`[a-z0-9][a-z0-9_-]*` (it names a `generate` output dir); a `site_url` with a
+scheme, port, path or whitespace (routing matches the bare Host); a section
+slug that is not one path segment or is reserved (`blog`, `static`, `admin`,
+`about` — see `config.CheckSectionSlug`, which `server.New` also calls); and any `admin_password_hash` (or a non-empty
+`global_admin_password_hash`) that is missing or not a well-formed bcrypt hash.
+`Load()` also fills per-site defaults, including resolving an unset per-site
+`template_path`/`static_path` to the global value — so handlers never need to
+consult the global paths.
+
+`Site.ID` is deliberately not read from TOML. `models.EnsureSites` writes it
+after upserting the `sites` table, and it is the FK every post, tag and session
+is scoped by. Persisted ids start at 1, so `ID == 0` means EnsureSites never
+ran; `handlers.New` (which both `serve` and `generate` go through) rejects
+that, because its per-site map is keyed by ID and every site would collapse
+into one entry.
 
 ## Template system (`internal/handlers/handler.go`)
+
+### siteHandler and the Handler map
+
+`Handler` holds one `siteHandler` per configured site, in a
+`map[int64]*siteHandler` keyed by `Site.ID` (plus the same handlers in config
+order, which `Generate` walks). A `siteHandler` bundles everything one site's
+request needs: its `config.Site`, a `*models.PostStore` already scoped via
+`ForSite(site.ID)`, and the `TemplateCache` for its `template_path`. Sites with
+the same `template_path` share one cache, so the default directory is parsed
+once however many sites use it.
+
+Every exported handler is a one-line `h.serve(w, r, h.xxx)`: `serve` reads the
+resolved site from `sitectx`, looks up its `siteHandler`, and calls the
+unexported body with it — or returns a bare 404 if no site was resolved. That is
+the only place an unresolved site is handled. Bodies take the `*siteHandler` as
+a parameter; a handler that reaches for a store or a template any other way is
+a tenant-isolation bug.
 
 ### TemplateCache
 
@@ -95,19 +151,19 @@ Always merges `siteData()` (SiteName, SiteURL, SiteDescription) with the provide
 ### renderToBytes()
 
 ```go
-func (h *Handler) renderToBytes(name string, data map[string]interface{}) ([]byte, error)
+func (h *Handler) renderToBytes(sh *siteHandler, name string, data map[string]interface{}) ([]byte, error)
 ```
 
-Same merge logic as `render()` but returns the result as `[]byte` instead of writing to a `ResponseWriter`. Used by the static site generator. Defined in `handlers/generate.go`.
+Same merge logic as `render()` but returns the result as `[]byte` instead of writing to a `ResponseWriter`. Takes its `siteHandler` explicitly because the static site generator has no request to resolve one from. Defined in `handlers/generate.go`.
 
 ### siteData()
 
-Returns:
+A method on `siteHandler`, returning that site's own values:
 ```go
 map[string]interface{}{
-    "SiteName":        h.cfg.SiteName,
-    "SiteURL":         h.cfg.SiteURL,
-    "SiteDescription": h.cfg.SiteDescription,
+    "SiteName":        sh.site.SiteName,
+    "SiteURL":         sh.site.SiteURL,
+    "SiteDescription": sh.site.SiteDescription,
 }
 ```
 
@@ -115,16 +171,33 @@ Always available in every template.
 
 ## Routing (`internal/server/server.go`)
 
-Uses `github.com/go-chi/chi/v5`. Routes registered at startup:
+Uses `github.com/go-chi/chi/v5`. One router serves every site.
+
+### Host resolution
+
+`resolveSite` is the first content middleware. It builds a
+`map[lowercased site_url]*config.Site` at startup, strips any `:port` from
+`r.Host`, lowercases it, and looks the site up. On a match it attaches the site
+with `sitectx.With`; on no match it returns a bare `http.NotFound` — the same
+404 a missing page gives, deliberately, so one tenant's hostnames leak nothing
+about the others. Every route below therefore runs with a resolved site, and
+`sitectx.From(r)` is how handlers reach it.
+
+Port-stripping and case-insensitivity are requirements, not conveniences: a
+reverse proxy forwarding `Host: host:port` would otherwise 404 every request.
+
+### Routes
+
+Routes registered at startup:
 
 | Method | Pattern | Handler |
 |---|---|---|
 | GET | `/` | `h.Home` |
-| GET | `/about` | redirect → `/blog/<about_slug>` |
+| GET | `/about` | redirect → `/blog/<about_slug>` of the resolved site |
 | GET | `/blog` | `h.BlogIndex` |
 | GET | `/blog/{slug}` | `h.BlogPost` |
-| GET | `/{section}/{page}` | `h.SectionPage` (per `[[section]]` in config) |
-| GET | `/static/*` | file server from `static_path` |
+| GET | `/{section}/{page}` | `h.SectionPage` (per `[[site.section]]` in config) |
+| GET | `/static/*` | per-site file server, built at boot, keyed by `Site.ID` |
 | GET | `/admin/login` | `h.AdminLogin` |
 | POST | `/admin/login` | `h.AdminLoginPost` |
 | POST | `/admin/logout` | `h.AdminLogout` (auth) |
@@ -134,7 +207,19 @@ Uses `github.com/go-chi/chi/v5`. Routes registered at startup:
 | GET | `/admin/posts/{id}/edit` | `h.AdminEditPost` (auth) |
 | POST | `/admin/posts/{id}` | `h.AdminUpdatePost` (auth) |
 
-Section routes are registered dynamically at startup by iterating `cfg.Sections`. Each section gets its own route `/{sec.Slug}/{page}` as a closure capturing the section value. Unknown sections are not routed — they 404 at the chi level automatically.
+chi routes cannot vary by Host, so section routes are registered once per
+*unique* section slug across all sites, and `handlers.SectionPage` decides
+per-request which site's `Section` content applies by reading `sitectx`. A slug
+configured on one site but not another therefore 404s on the site that didn't
+configure it. Slugs no site configures are never routed — they 404 at the chi
+level automatically.
+
+The auth-gated group uses `session.Middleware`, which accepts a session only if
+`auth.Session.Allows` the resolved site: the session is either global (an
+explicit flag, issued by `SetGlobalSession` for the global admin password) or
+a site session for exactly that site ID (`SetSiteSession`). The cookie payload
+is `<issuedAt>:global` or `<issuedAt>:site:<id>` with `id > 0`; no site ID
+doubles as "global", and an unresolved site fails closed.
 
 ## Template data by route
 
@@ -142,17 +227,17 @@ Section routes are registered dynamically at startup by iterating `cfg.Sections`
 
 | Key | Type | Value |
 |---|---|---|
-| `.SiteName` | string | `site_name` config |
-| `.SiteURL` | string | `site_url` config |
-| `.SiteDescription` | string | `site_description` config |
+| `.SiteName` | string | resolved site's `site_name` |
+| `.SiteURL` | string | resolved site's `site_url` |
+| `.SiteDescription` | string | resolved site's `site_description` |
 
 ### `/blog`
 
 | Key | Type | Value |
 |---|---|---|
-| `.Posts` | `[]models.Post` | published posts, newest first |
+| `.Posts` | `[]models.Post` | this site's published posts, newest first |
 | `.ActiveTag` | string | active tag filter (empty if none) |
-| `.AllTags` | `[]string` | all tags across all posts |
+| `.AllTags` | `[]string` | all of this site's tags |
 
 ### `/blog/{slug}`
 
@@ -188,7 +273,31 @@ type Post struct {
 }
 ```
 
-`PostStore` wraps a `*sql.DB`. Key methods: `List()`, `GetBySlug()`, `Create()`, `Update()`.
+`PostStore` is **site-scoped**. `NewPostStore(db)` returns an unscoped store
+whose only legitimate use is `ForSite(siteID)`, which returns a copy confined to
+one site's rows; every read and write through it carries an explicit
+`site_id = ?` condition, including the `Preload("Tags", ...)` on tag reads and
+the find-or-create in `resolveTags`. Those conditions are written as SQL strings
+rather than struct-valued `Where`s on purpose — GORM drops zero-valued struct
+fields, which would silently widen a query to every site.
+
+Key methods: `List()`, `ListByTag()`, `GetBySlug()`, `GetByID()`, `Create()`,
+`Update()`, `Delete()`, `AllTags()`, `Stats()`. `Update` and `Delete` return a
+not-found error when the id belongs to another site, rather than silently
+affecting nothing.
+
+Schema notes: `posts(site_id, slug)` and `tags(site_id, name)` are uniquely
+indexed, so slugs and tag names are unique *per site*, not globally. Tags are
+never shared across sites — two sites using the same tag name each own a row.
+
+### Sites (`internal/models/site.go`)
+
+`EnsureSites(db, sites)` upserts each configured site by `key`, keeps its
+`hostname` column in sync with `site_url`, and writes the DB-assigned id back to
+`config.Site.ID`. It must run before `handlers.New` or `server.New`. It also
+warns (via `log`) about any `sites` row that owns posts or tags but matches no
+configured `key` — the single-site upgrade trap, where content stays attached to
+migration 002's `default` placeholder site.
 
 ## CLI commands (`main.go`)
 
@@ -221,8 +330,8 @@ Templates use standard Go `html/template`. One template function is registered: 
 1. Home → `{outDir}/index.html`
 2. Blog index (published posts, no tag filter) → `{outDir}/blog/index.html`
 3. Each published post → `{outDir}/blog/{slug}/index.html`
-4. Each section page (from `cfg.Sections`) → `{outDir}/{section}/{page}/index.html`
-5. Copy `cfg.StaticPath` → `{outDir}/static/`
+4. Each section page (from `site.Sections`) → `{outDir}/{section}/{page}/index.html`
+5. Copy `site.StaticPath` → `{outDir}/static/`
 
 Section pages whose templates are missing log a warning and are skipped; the build continues. Admin routes and the `/about` redirect are not generated.
 
@@ -234,10 +343,12 @@ The `generate` CLI command (`main.go`) accepts `--out` (default `./out`) and `--
 
 ## How to add a new hard-coded route
 
-1. Add a handler method on `*Handler` in `internal/handlers/`.
+1. Add an exported method on `*Handler` in `internal/handlers/` that calls
+   `h.serve(w, r, h.yourBody)`, and write the body as
+   `func (h *Handler) yourBody(w http.ResponseWriter, r *http.Request, sh *siteHandler)`.
 2. Register the route in `internal/server/server.go`.
 3. Add the template at the appropriate path under `template_path`.
-4. Call `h.render(w, r, "path/to/template.html", data)` — site data is merged automatically.
+4. Call `h.render(w, sh, "path/to/template.html", data)` — site data is merged automatically.
 
 Do not add a new route for content that fits the `[[section]]` pattern — use config instead.
 
