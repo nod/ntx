@@ -21,12 +21,15 @@ type Site struct {
 	Description      string
 	AboutSlug        string
 	Theme            string
-	ProviderType     string // '', 'google' or 'auth0' (configured in phase 2)
+	ProviderType     string // '', ProviderGoogle or ProviderAuth0
 	ProviderClientID string
 	ProviderDomain   string
-	Sections         []Section
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	// ProviderSecretSet reports whether a client secret is stored. The
+	// secret itself never leaves the store except through ProviderSecret.
+	ProviderSecretSet bool
+	Sections          []Section
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 // Section is a URL namespace (/<slug>/<page>) backed by theme templates.
@@ -64,8 +67,11 @@ type dbSite struct {
 	ProviderType     string
 	ProviderClientID string
 	ProviderDomain   string
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	// ProviderClientSecretEnc is sealed by secretbox; models never sees
+	// the plaintext.
+	ProviderClientSecretEnc []byte
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
 }
 
 func (dbSite) TableName() string { return "sites" }
@@ -135,7 +141,8 @@ func (s *SiteStore) List() ([]Site, error) {
 			ID: int64(r.ID), Key: r.Key, Hostname: r.Hostname, Name: r.Name,
 			Description: r.Description, AboutSlug: r.AboutSlug, Theme: r.Theme,
 			ProviderType: r.ProviderType, ProviderClientID: r.ProviderClientID, ProviderDomain: r.ProviderDomain,
-			Sections: secsBySite[int64(r.ID)], CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+			ProviderSecretSet: len(r.ProviderClientSecretEnc) > 0,
+			Sections:          secsBySite[int64(r.ID)], CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 		}
 	}
 	return sites, nil
@@ -298,6 +305,84 @@ func (s *SiteStore) SetSections(siteID int64, secs []Section) error {
 		}
 		return nil
 	})
+}
+
+const (
+	ProviderGoogle = "google"
+	ProviderAuth0  = "auth0"
+)
+
+// ProviderSettings is a site's sign-in provider, minus the secret.
+type ProviderSettings struct {
+	Type     string // "", ProviderGoogle or ProviderAuth0
+	Domain   string // Auth0 only
+	ClientID string
+}
+
+// SetProvider saves a site's provider. sealedSecret is the new client
+// secret, already sealed, or nil to keep the stored one -- which is allowed
+// only when the type, domain and client ID are all unchanged, so a changed
+// domain can never be sent the old secret. Type "" removes the provider.
+func (s *SiteStore) SetProvider(siteID int64, p ProviderSettings, sealedSecret []byte) error {
+	var cur dbSite
+	if err := s.db.First(&cur, siteID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return invalid("site %d does not exist", siteID)
+		}
+		return err
+	}
+	p.Type = strings.TrimSpace(p.Type)
+	p.Domain = strings.ToLower(strings.TrimSpace(p.Domain))
+	p.ClientID = strings.TrimSpace(p.ClientID)
+
+	fields := map[string]any{"updated_at": time.Now()}
+	switch p.Type {
+	case "":
+		fields["provider_type"], fields["provider_domain"], fields["provider_client_id"] = "", "", ""
+		fields["provider_client_secret_enc"] = nil
+		return s.db.Model(&cur).Updates(fields).Error
+	case ProviderGoogle:
+		p.Domain = ""
+	case ProviderAuth0:
+		if p.Domain == "" {
+			return invalid("an Auth0 domain is required (e.g. acme.us.auth0.com)")
+		}
+		if err := validate.Hostname(p.Domain); err != nil {
+			return invalid("Auth0 domain: %s", err)
+		}
+	default:
+		return invalid("provider must be Google or Auth0")
+	}
+	if p.ClientID == "" {
+		return invalid("a client ID is required")
+	}
+
+	if sealedSecret == nil {
+		unchanged := p.Type == cur.ProviderType && p.Domain == cur.ProviderDomain && p.ClientID == cur.ProviderClientID
+		switch {
+		case len(cur.ProviderClientSecretEnc) == 0:
+			return invalid("a client secret is required")
+		case !unchanged:
+			return invalid("enter the client secret again: the provider, domain or client ID changed")
+		}
+	} else {
+		fields["provider_client_secret_enc"] = sealedSecret
+	}
+	fields["provider_type"], fields["provider_domain"], fields["provider_client_id"] = p.Type, p.Domain, p.ClientID
+	return s.db.Model(&cur).Updates(fields).Error
+}
+
+// ProviderSecret returns the site's sealed client secret, or nil if none is
+// stored.
+func (s *SiteStore) ProviderSecret(siteID int64) ([]byte, error) {
+	var r dbSite
+	if err := s.db.Select("id", "provider_client_secret_enc").First(&r, siteID).Error; err != nil {
+		return nil, err
+	}
+	if len(r.ProviderClientSecretEnc) == 0 {
+		return nil, nil
+	}
+	return r.ProviderClientSecretEnc, nil
 }
 
 func encodeVars(v map[string]any) (string, error) {

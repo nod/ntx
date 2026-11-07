@@ -76,3 +76,23 @@ func SectionSlug(slug string) error {
 	}
 	return nil
 }
+
+// Email checks an address that the caller has already trimmed and
+// lowercased. It is deliberately loose: the provider verifies the mailbox;
+// this only keeps obvious typos and junk out of the users table.
+func Email(s string) error {
+	switch {
+	case s == "":
+		return fmt.Errorf("email must be set")
+	case len(s) > 254:
+		return fmt.Errorf("email %q is too long", s)
+	case strings.IndexFunc(s, func(r rune) bool { return r <= ' ' || r == 0x7f }) >= 0:
+		return fmt.Errorf("email %q must not contain spaces or control characters", s)
+	}
+	local, domain, ok := strings.Cut(s, "@")
+	if !ok || local == "" || domain == "" || strings.Contains(domain, "@") || !strings.Contains(domain, ".") ||
+		strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") {
+		return fmt.Errorf("%q is not an email address", s)
+	}
+	return nil
+}

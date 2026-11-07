@@ -1,6 +1,9 @@
 package validate
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestKey(t *testing.T) {
 	for _, k := range []string{"../www", "a/b", `a\b`, "..", ".", "Blog", " a", "a b", ".hidden", ""} {
@@ -56,6 +59,20 @@ func TestSegmentRejectsTraversal(t *testing.T) {
 	for _, s := range []string{"one", "v1.2", "Blog"} {
 		if err := Segment(s); err != nil {
 			t.Errorf("Segment(%q): unexpected error: %v", s, err)
+		}
+	}
+}
+
+func TestEmail(t *testing.T) {
+	for _, ok := range []string{"a@b.co", "first.last+tag@sub.example.com"} {
+		if err := Email(ok); err != nil {
+			t.Errorf("Email(%q) = %v, want nil", ok, err)
+		}
+	}
+	long := strings.Repeat("a", 246) + "@bb.co.uk" // 255 bytes
+	for _, bad := range []string{"", "a", "a@", "@b.co", "a@b", "a@@b.co", "a b@c.co", "a@b.co\n", long} {
+		if err := Email(bad); err == nil {
+			t.Errorf("Email(%q) = nil, want an error", bad)
 		}
 	}
 }
