@@ -1,76 +1,64 @@
 # Releasing ntx
 
-Releases are built and signed automatically by the SLSA Level 3 workflow when a version tag is pushed. The workflow produces binaries for linux/darwin × amd64/arm64 plus a signed provenance attestation.
+Pushing a `v*` tag releases ntx. The **Go** workflow (`.github/workflows/go.yml`) runs the tests, builds linux/darwin × amd64/arm64 binaries, publishes them as a GitHub release, and updates the Homebrew formula on `main`. There is no version file: the version is the tag.
 
 ## Prerequisites
 
 - Write access to the repository
-- `just` installed locally
-- All changes merged to `main` and tests passing
+- All changes merged to `main`, and the CI run on `main` green
 
 ## Steps
 
-### 1. Update VERSION
+### 1. Tag the release
+
+Tags are `v` + `MAJOR.MINOR.PATCH`:
 
 ```sh
-echo "1.2.3" > VERSION
-git add VERSION
-git commit -m "Bump version to 1.2.3"
-git push origin main
-```
-
-Wait for the CI test run on `main` to pass before tagging.
-
-### 2. Tag the release
-
-Tags must be prefixed with `v`. The SLSA workflow only triggers on `v*` tags.
-
-```sh
+git switch main && git pull
 git tag -a v1.2.3 -m "Release v1.2.3"
 git push origin v1.2.3
 ```
 
-### 3. Watch the workflow
+A tag with a suffix (`v1.2.3-rc1`) is published as a **pre-release**: it is not marked "latest", so `install.sh` won't pick it up, and the Homebrew formula is left alone.
 
-Go to **Actions → SLSA Go releaser** in the GitHub UI. Two jobs run:
+### 2. Watch the workflow
+
+**Actions → Go** shows three jobs for the tag:
 
 | Job | What it does |
 |---|---|
-| `args` | Extracts version, commit SHA, date, and tree state from git |
-| `build` | Builds all four platform binaries, generates signed SLSA provenance, creates the GitHub release |
+| `test` | `go vet` and `go test` |
+| `release` | Builds the four binaries, checks `ntx version` prints the tag's version, and creates the GitHub release with auto-generated notes |
+| `formula` | Regenerates `Formula/ntx.rb` with the new version and checksums (`scripts/gen-formula.sh`) and commits it to `main` as `github-actions[bot]` |
 
-The `build` job calls the `slsa-framework/slsa-github-generator` reusable workflow. It will request permission to write to the repository — GitHub will show an approval prompt in the Actions UI if your repo requires it.
+### 3. Verify the release
 
-### 4. Verify the release
-
-Once the workflow completes, check **Releases** in GitHub. The release should contain:
+The release should contain:
 
 ```
 ntx-linux-amd64
 ntx-linux-arm64
 ntx-darwin-amd64
 ntx-darwin-arm64
-ntx.intoto.jsonl        ← SLSA provenance attestation
+checksums.txt
 ```
 
-Release notes are auto-generated from commits since the previous tag.
-
-### 5. Verify provenance locally (optional)
-
-Install [`slsa-verifier`](https://github.com/slsa-framework/slsa-verifier) and run:
+and `main` should have a new commit, "Update Homebrew formula to v1.2.3". Then:
 
 ```sh
-slsa-verifier verify-artifact ntx-linux-amd64 \
-  --provenance-path ntx.intoto.jsonl \
-  --source-uri github.com/nod/ntx \
-  --source-tag v1.2.3
+brew update && brew upgrade ntx      # or: brew tap nod/ntx https://github.com/nod/ntx && brew install ntx
+ntx version                          # prints: 1.2.3
 ```
 
-A clean result confirms the binary was built from the tagged commit in GitHub Actions and was not tampered with.
+To check a downloaded binary by hand: `sha256sum -c checksums.txt --ignore-missing`.
+
+## Building locally
+
+`just build-all` produces the same four binaries and `checksums.txt` in `build/`, stamped with `git describe` (e.g. `1.2.3`, or `1.2.3-4-gabc1234-dirty` between tags). `just formula` prints the formula those binaries would get.
 
 ## If something goes wrong
 
-**Workflow fails before the release is created** — delete the tag, fix the issue, re-tag:
+**Workflow fails before the release is created**: delete the tag, fix the issue, re-tag:
 
 ```sh
 git tag -d v1.2.3
@@ -78,14 +66,15 @@ git push origin :refs/tags/v1.2.3
 # fix, then re-tag
 ```
 
-**Release was created but is incomplete** — delete the release in the GitHub UI (Releases → Edit → Delete), delete the tag as above, and re-tag after fixing.
+**Release was created but is incomplete**: delete the release in the GitHub UI (Releases → Edit → Delete), delete the tag as above, and re-tag after fixing.
 
-**Accidental tag on the wrong commit** — same as above. Never force-push a tag that has already triggered a release; delete and recreate cleanly.
-
-## Version convention
-
-ntx uses `MAJOR.MINOR.PATCH` without any `v` prefix in the `VERSION` file. The `v` prefix lives only in the git tag. The binary reports the version without the `v`:
+**The `formula` job failed** (for example, branch protection on `main` rejects the bot's push): the release itself is fine. Update the formula by hand from the release's `checksums.txt`:
 
 ```sh
-ntx version   # prints: 1.2.3
+curl -sSfLO https://github.com/nod/ntx/releases/download/v1.2.3/checksums.txt
+scripts/gen-formula.sh 1.2.3 checksums.txt > Formula/ntx.rb
 ```
+
+then commit it to `main`, or re-run the job from the Actions UI once the cause is fixed.
+
+**Accidental tag on the wrong commit**: same as the first case. Never force-push a tag that has already triggered a release; delete it and recreate it cleanly.
