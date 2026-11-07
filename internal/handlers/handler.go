@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/nod/ntx/internal/adminui"
 	"github.com/nod/ntx/internal/auth"
@@ -98,6 +99,12 @@ func templateFuncs() template.FuncMap {
 	}
 }
 
+// DefaultProviderTimeout is the per-request budget for the sign-in
+// provider. It must leave time to write the error page inside the server's
+// write timeout (10s), or a hung provider gets a dropped connection
+// instead of "couldn't reach the sign-in provider".
+const DefaultProviderTimeout = 6 * time.Second
+
 // Deps is everything the handlers need.
 type Deps struct {
 	Sites       *models.SiteStore
@@ -112,6 +119,10 @@ type Deps struct {
 	// IssuerFor maps a site's provider to its configured issuer; nil means
 	// sso.Issuer. Tests point it at a fake provider.
 	IssuerFor func(providerType, domain string) string
+	// ProviderTimeout bounds all talk with the sign-in provider in one
+	// request (discovery, code exchange, keys); 0 means
+	// DefaultProviderTimeout.
+	ProviderTimeout time.Duration
 	// SessionSecret signs the ntx_oauth flow cookie; EncryptionKey opens
 	// provider client secrets.
 	SessionSecret    []byte

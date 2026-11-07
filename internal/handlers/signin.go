@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -82,6 +83,16 @@ func (h *Handler) providerTrouble(w http.ResponseWriter, r *http.Request, err er
 	}
 }
 
+// providerCtx bounds every provider call made for this request, so a hung
+// provider still leaves time to answer with the 502 page.
+func (h *Handler) providerCtx(r *http.Request) (context.Context, context.CancelFunc) {
+	d := h.d.ProviderTimeout
+	if d <= 0 {
+		d = DefaultProviderTimeout
+	}
+	return context.WithTimeout(r.Context(), d)
+}
+
 func (h *Handler) signInExpired(w http.ResponseWriter, r *http.Request) {
 	h.message(w, r, http.StatusBadRequest, "sign-in expired", "Your sign-in expired. Try again.", "/admin/login", "sign in")
 }
@@ -104,7 +115,9 @@ func (h *Handler) AuthStart(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		flow := sso.NewFlow(site.ID, r.FormValue("invite"), time.Now())
-		target, err := h.d.SSO.AuthCodeURL(r.Context(), settings, flow)
+		ctx, cancel := h.providerCtx(r)
+		defer cancel()
+		target, err := h.d.SSO.AuthCodeURL(ctx, settings, flow)
 		if err != nil {
 			h.providerTrouble(w, r, err)
 			return
@@ -131,6 +144,9 @@ func (h *Handler) AuthCallback(w http.ResponseWriter, r *http.Request) {
 		}
 		q := r.URL.Query()
 		if q.Get("error") != "" {
+			// The request log drops this URL's query, so record why the
+			// provider refused (no secrets in these two fields).
+			log.Printf("sign-in on %q: provider returned error %q: %q", site.Key, q.Get("error"), q.Get("error_description"))
 			h.message(w, r, http.StatusBadRequest, "sign-in cancelled", "Sign-in was cancelled.", "/admin/login", "sign in")
 			return
 		}
@@ -144,7 +160,9 @@ func (h *Handler) AuthCallback(w http.ResponseWriter, r *http.Request) {
 			h.providerTrouble(w, r, err)
 			return
 		}
-		claims, err := h.d.SSO.Exchange(r.Context(), settings, q.Get("code"), flow)
+		ctx, cancel := h.providerCtx(r)
+		defer cancel()
+		claims, err := h.d.SSO.Exchange(ctx, settings, q.Get("code"), flow)
 		switch {
 		case errors.Is(err, sso.ErrEmailNotVerified):
 			h.noAccess(w, r)

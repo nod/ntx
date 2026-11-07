@@ -237,7 +237,7 @@ func openApp(cfgFile string) (*app, error) {
 		Invites:          invites,
 		Sessions:         sessions,
 		People:           people.New(users, ids, mems, invites),
-		SSO:              sso.NewClient(&http.Client{Timeout: 10 * time.Second}),
+		SSO:              sso.NewClient(&http.Client{Timeout: handlers.DefaultProviderTimeout}),
 		SessionSecret:    []byte(cfg.SessionSecret),
 		EncryptionKey:    cfg.EncryptionKey,
 		Registry:         reg,

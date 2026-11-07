@@ -22,6 +22,12 @@ import (
 	"github.com/nod/ntx/internal/sitereg"
 )
 
+// WriteTimeout bounds how long a handler has to write its response,
+// counted from when the request was read. Slow work in handlers (the
+// sign-in provider) must finish well inside it; see
+// handlers.DefaultProviderTimeout.
+const WriteTimeout = 10 * time.Second
+
 func New(cfg *config.Config, h *handlers.Handler, reg *sitereg.Registry, am *auth.Manager) *http.Server {
 	r := chi.NewRouter()
 	r.Use(clientip.Middleware(cfg.TrustedProxies))
@@ -48,7 +54,7 @@ func New(cfg *config.Config, h *handlers.Handler, reg *sitereg.Registry, am *aut
 		// SameSite=Strict alone treats sibling subdomains as same-site.
 		Handler:      http.NewCrossOriginProtection().Handler(r),
 		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		WriteTimeout: WriteTimeout,
 		IdleTimeout:  120 * time.Second,
 	}
 }

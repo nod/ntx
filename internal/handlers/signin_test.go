@@ -1,7 +1,10 @@
 package handlers
 
 import (
+	"bytes"
 	"html"
+	"log"
+	"os"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -232,5 +235,24 @@ func TestLoginPageShowsProviderButton(t *testing.T) {
 	body = e.do(http.MethodGet, platformHost, "/admin/login", nil, nil).Body.String()
 	if strings.Contains(body, "/auth/start") {
 		t.Fatal("platform login page shows a provider button")
+	}
+}
+
+// A provider that refuses the sign-in (Auth0 rule, unauthorized_client,
+// unregistered callback) says why in error and error_description; an admin
+// debugging setup needs that in the log.
+func TestCallbackProviderErrorIsLogged(t *testing.T) {
+	e := newEnv(t)
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	flow, back := e.startSSO(hostA, verified("s1", "c@x.io"), "")
+	path := "/auth/callback?error=unauthorized_client&error_description=Callback+URL+mismatch&state=" + back.Query().Get("state")
+	if rec := e.doWith(http.MethodGet, hostA, path, nil, flow); rec.Code != http.StatusBadRequest {
+		t.Fatalf("provider error: %d", rec.Code)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "unauthorized_client") || !strings.Contains(out, "Callback URL mismatch") || !strings.Contains(out, `"a"`) {
+		t.Fatalf("log lacks the provider's error: %q", out)
 	}
 }

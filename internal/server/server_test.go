@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -64,7 +65,7 @@ func setup(t *testing.T) *env { t.Helper(); return setupMode(t, true) }
 // setupMode builds the full server stack; dev=false is production mode
 // (https callback URLs, Secure cookies). Both sites sign in through a fake
 // Auth0 tenant.
-func setupMode(t *testing.T, dev bool) *env {
+func setupMode(t *testing.T, dev bool, opts ...func(*handlers.Deps)) *env {
 	t.Helper()
 	d, err := db.Open("sqlite://:memory:")
 	if err != nil {
@@ -114,7 +115,7 @@ func setupMode(t *testing.T, dev bool) *env {
 	ids, invites := models.NewIdentityStore(d), models.NewInviteStore(d)
 	am := auth.NewManager(sessions, users, mems, rootHash, !dev)
 	posts := models.NewPostStore(d)
-	h := handlers.New(handlers.Deps{
+	deps := handlers.Deps{
 		Sites: sites, Posts: posts, Users: users, Registry: reg, Auth: am,
 		Memberships: mems, Identities: ids, Invites: invites, Sessions: sessions,
 		People: people.New(users, ids, mems, invites), SSO: sso.NewClient(nil),
@@ -122,8 +123,16 @@ func setupMode(t *testing.T, dev bool) *env {
 		IssuerFor: func(string, string) string { return fake.URL },
 		Limiter:   auth.NewLimiter(), ThemesPath: themesRoot, PlatformHostname: platformHost,
 		RootPasswordHash: rootHash, Dev: dev,
-	})
-	ts := httptest.NewServer(New(cfg, h, reg, am).Handler)
+	}
+	for _, o := range opts {
+		o(&deps)
+	}
+	h := handlers.New(deps)
+	// Run under the production server's own timeouts.
+	srv := New(cfg, h, reg, am)
+	ts := httptest.NewUnstartedServer(srv.Handler)
+	ts.Config.ReadTimeout, ts.Config.WriteTimeout, ts.Config.IdleTimeout = srv.ReadTimeout, srv.WriteTimeout, srv.IdleTimeout
+	ts.Start()
 	t.Cleanup(ts.Close)
 	return &env{
 		t: t, ts: ts, themes: themesRoot, posts: posts, siteA: a, siteB: b, fake: fake,
@@ -131,7 +140,10 @@ func setupMode(t *testing.T, dev bool) *env {
 	}
 }
 
-var noRedirect = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+var noRedirect = &http.Client{
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	Timeout:       20 * time.Second, // a hung handler fails the test instead of hanging it
+}
 
 // do sends a request with an explicit Host header, the way a browser
 // addressing that site would, and returns the status and body.
@@ -490,5 +502,35 @@ func TestSSOCallbackSetsSessionBehindProxy(t *testing.T) {
 	sess := cookieOf(e.ssoLogin("a.example.com", "m@x.io", proxied), "ntx_session")
 	if sess == nil || !sess.Secure {
 		t.Fatalf("session cookie not Secure: %+v", sess)
+	}
+}
+
+// The provider budget must leave room to write the 502 page before the
+// server's write deadline, which starts when the request arrives.
+func TestProviderBudgetFitsWriteTimeout(t *testing.T) {
+	if handlers.DefaultProviderTimeout > WriteTimeout-3*time.Second {
+		t.Fatalf("provider budget %v leaves too little of the %v write timeout", handlers.DefaultProviderTimeout, WriteTimeout)
+	}
+}
+
+// Review Focus 2, hanging variant: a provider that accepts connections and
+// never answers still gets the 502 page, not a dropped connection.
+func TestHangingProviderGets502(t *testing.T) {
+	hole, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { hole.Close() })
+	e := setupMode(t, true, func(d *handlers.Deps) {
+		d.IssuerFor = func(string, string) string { return "http://" + hole.Addr().String() }
+		d.ProviderTimeout = 300 * time.Millisecond
+	})
+	start := time.Now()
+	resp, body := e.do(http.MethodGet, "a.example.com", "/auth/start", nil, nil, nil)
+	if resp.StatusCode != http.StatusBadGateway || !strings.Contains(body, "reach the sign-in provider") {
+		t.Fatalf("hanging provider: %d %s", resp.StatusCode, body)
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Fatalf("took %v; the provider budget wasn't applied", took)
 	}
 }
