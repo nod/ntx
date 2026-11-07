@@ -1,49 +1,25 @@
+// Package auth signs people in and works out who a request belongs to.
+// Sessions live in the database (models.SessionStore); the cookie holds
+// only a random token, and a session is valid only on the host it was
+// issued for.
 package auth
 
 import (
-	"crypto/hmac"
+	"context"
 	"crypto/sha256"
-	"encoding/base64"
-	"errors"
-	"fmt"
+	"encoding/hex"
 	"net/http"
-	"strconv"
-	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/nod/ntx/internal/models"
 )
 
 const (
-	cookieName    = "ntx_session"
-	sessionMaxAge = 24 * time.Hour
+	cookieName = "ntx_session"
+	sessionTTL = 24 * time.Hour
 )
-
-// Session is what a valid session cookie grants. A global session -- issued
-// against the global admin password -- is valid on every site; any other
-// session is valid only on SiteID. Global is an explicit flag rather than a
-// reserved SiteID so that no id, least of all Go's zero value, can ever be
-// mistaken for "every site".
-type Session struct {
-	Global bool
-	SiteID int64 // meaningful only when !Global; always > 0
-}
-
-// Allows reports whether s authenticates a request for siteID.
-func (s Session) Allows(siteID int64) bool {
-	return s.Global || s.SiteID == siteID
-}
-
-var ErrInvalidSession = errors.New("invalid session")
-
-type SessionManager struct {
-	secret []byte
-	secure bool
-}
-
-func NewSessionManager(secret string, secure bool) *SessionManager {
-	return &SessionManager{secret: []byte(secret), secure: secure}
-}
 
 func CheckPassword(hash, password string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
@@ -54,32 +30,70 @@ func HashPassword(password string) (string, error) {
 	return string(b), err
 }
 
-// SetSiteSession issues a session valid only on siteID.
-func (sm *SessionManager) SetSiteSession(w http.ResponseWriter, siteID int64) {
-	sm.setCookie(w, fmt.Sprintf("site:%d", siteID))
+// RootDigest fingerprints root_password_hash. Root sessions store it at
+// sign-in, so changing the hash in config ends every existing root session.
+func RootDigest(hash string) string {
+	sum := sha256.Sum256([]byte(hash))
+	return hex.EncodeToString(sum[:])
 }
 
-// SetGlobalSession issues a session valid on every site.
-func (sm *SessionManager) SetGlobalSession(w http.ResponseWriter) {
-	sm.setCookie(w, "global")
+// Actor is who a request belongs to. A nil *Actor is an anonymous request;
+// every method is safe to call on nil.
+type Actor struct {
+	User    *models.User
+	Session *models.Session
 }
 
-// setCookie signs "<issuedAt>:<scope>" and sets it as the session cookie.
-func (sm *SessionManager) setCookie(w http.ResponseWriter, scope string) {
-	payload := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%d:%s", time.Now().Unix(), scope)))
-	value := payload + "." + sm.sign(payload)
+func (a *Actor) IsRoot() bool { return a != nil && a.User.IsRoot }
+
+// IsPlatform reports root or platform-admin powers.
+func (a *Actor) IsPlatform() bool { return a != nil && (a.User.IsRoot || a.User.IsPlatformAdmin) }
+
+// CanAdminSite reports site-admin powers on the site the session is for.
+// Phase 1 has no memberships, so only platform powers grant it.
+func (a *Actor) CanAdminSite() bool { return a.IsPlatform() }
+
+type Manager struct {
+	sessions   *models.SessionStore
+	users      *models.UserStore
+	rootDigest string
+	secure     bool
+}
+
+func NewManager(sessions *models.SessionStore, users *models.UserStore, rootPasswordHash string, secure bool) *Manager {
+	return &Manager{sessions: sessions, users: users, rootDigest: RootDigest(rootPasswordHash), secure: secure}
+}
+
+// Login starts a session for user on the current host -- siteID is the
+// resolved site, or nil on the platform host -- and sets the cookie.
+func (m *Manager) Login(w http.ResponseWriter, user *models.User, siteID *int64) error {
+	digest := ""
+	if user.IsRoot {
+		digest = m.rootDigest
+	}
+	token, err := m.sessions.Create(user.ID, siteID, digest, sessionTTL)
+	if err != nil {
+		return err
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
-		Value:    value,
+		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		MaxAge:   int(sessionMaxAge.Seconds()),
+		MaxAge:   int(sessionTTL.Seconds()),
 		SameSite: http.SameSiteStrictMode,
-		Secure:   sm.secure,
+		Secure:   m.secure,
 	})
+	return nil
 }
 
-func (sm *SessionManager) ClearSession(w http.ResponseWriter) {
+// Logout deletes the request's session and clears the cookie.
+func (m *Manager) Logout(w http.ResponseWriter, r *http.Request) error {
+	if c, err := r.Cookie(cookieName); err == nil {
+		if err := m.sessions.Delete(c.Value); err != nil {
+			return err
+		}
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
 		Value:    "",
@@ -88,85 +102,59 @@ func (sm *SessionManager) ClearSession(w http.ResponseWriter) {
 		MaxAge:   -1,
 		Expires:  time.Unix(0, 0),
 		SameSite: http.SameSiteStrictMode,
-		Secure:   sm.secure,
+		Secure:   m.secure,
 	})
+	return nil
 }
 
-// Session returns what r's session cookie grants, and whether a valid,
-// unexpired session was present at all.
-func (sm *SessionManager) Session(r *http.Request) (Session, bool) {
-	cookie, err := r.Cookie(cookieName)
-	if err != nil {
-		return Session{}, false
-	}
-	sess, err := sm.verify(cookie.Value)
-	if err != nil {
-		return Session{}, false
-	}
-	return sess, true
-}
+type ctxKey struct{}
 
-// Middleware redirects to /admin/login unless r carries a valid session
-// that allows the site currentSite resolves for r. If currentSite cannot
-// resolve a site it fails closed, even for a global session.
-func (sm *SessionManager) Middleware(currentSite func(*http.Request) (int64, bool)) func(http.Handler) http.Handler {
+// Middleware attaches the request's Actor, if its session is valid for the
+// current host. current reports the resolved site, or onSite=false on the
+// platform host. It never redirects: handlers decide what anonymous
+// requests get.
+func (m *Manager) Middleware(current func(*http.Request) (siteID int64, onSite bool)) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			siteID, resolved := currentSite(r)
-			sess, ok := sm.Session(r)
-			if !resolved || !ok || !sess.Allows(siteID) {
-				http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
-				return
+			if a := m.actor(r, current); a != nil {
+				r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, a))
 			}
 			next.ServeHTTP(w, r)
 		})
 	}
 }
 
-func (sm *SessionManager) sign(payload string) string {
-	mac := hmac.New(sha256.New, sm.secret)
-	mac.Write([]byte(payload))
-	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
+func (m *Manager) actor(r *http.Request, current func(*http.Request) (int64, bool)) *Actor {
+	c, err := r.Cookie(cookieName)
+	if err != nil || c.Value == "" {
+		return nil
+	}
+	sess, err := m.sessions.Lookup(c.Value, time.Now())
+	if err != nil || sess == nil {
+		return nil
+	}
+	siteID, onSite := current(r)
+	if onSite {
+		if sess.SiteID == nil || *sess.SiteID != siteID {
+			return nil
+		}
+	} else if sess.SiteID != nil {
+		return nil
+	}
+	user, err := m.users.GetByID(sess.UserID)
+	if err != nil || user == nil {
+		return nil
+	}
+	// Phase 1: only root can hold a session. Phase 2 adds members, whose
+	// sessions also need a current membership on the session's site.
+	if !user.IsRoot || sess.RootHashDigest != m.rootDigest {
+		return nil
+	}
+	return &Actor{User: user, Session: sess}
 }
 
-func (sm *SessionManager) verify(value string) (Session, error) {
-	parts := strings.SplitN(value, ".", 2)
-	if len(parts) != 2 {
-		return Session{}, ErrInvalidSession
-	}
-	expected := sm.sign(parts[0])
-	if !hmac.Equal([]byte(expected), []byte(parts[1])) {
-		return Session{}, ErrInvalidSession
-	}
-
-	decoded, err := base64.StdEncoding.DecodeString(parts[0])
-	if err != nil {
-		return Session{}, ErrInvalidSession
-	}
-
-	// "<issuedAt>:global" or "<issuedAt>:site:<id>"; anything else --
-	// including the pre-flag "<issuedAt>:<id>" format -- is rejected.
-	fields := strings.Split(string(decoded), ":")
-	issuedAt, err := strconv.ParseInt(fields[0], 10, 64)
-	if err != nil {
-		return Session{}, ErrInvalidSession
-	}
-	var sess Session
-	switch {
-	case len(fields) == 2 && fields[1] == "global":
-		sess.Global = true
-	case len(fields) == 3 && fields[1] == "site":
-		id, err := strconv.ParseInt(fields[2], 10, 64)
-		if err != nil || id <= 0 {
-			return Session{}, ErrInvalidSession
-		}
-		sess.SiteID = id
-	default:
-		return Session{}, ErrInvalidSession
-	}
-
-	if time.Since(time.Unix(issuedAt, 0)) > sessionMaxAge {
-		return Session{}, ErrInvalidSession
-	}
-	return sess, nil
+// ActorFrom returns the request's Actor, or nil if it is anonymous.
+func ActorFrom(r *http.Request) *Actor {
+	a, _ := r.Context().Value(ctxKey{}).(*Actor)
+	return a
 }
