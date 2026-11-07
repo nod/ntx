@@ -1,6 +1,6 @@
 # ntx — usage guide
 
-`ntx` is a self-hosted personal site server: blog, projects, admin UI. It is not tied to any specific site — everything that appears in the browser comes from config and templates you supply.
+`ntx` is a self-hosted site server for one or more sites: blog, content sections, admin UI. Sites are created and managed in the browser; their look comes from themes you supply.
 
 ## Requirements
 
@@ -10,19 +10,31 @@
 ## Quick start
 
 ```bash
-# 1. Clone / copy the ntx directory into your project
-# 2. Generate a starter config — prompts for password, auto-generates session_secret
+# 1. Generate a config: prompts for the root password, generates the secrets
 ntx gen-config -p > ntx.toml
-$EDITOR ntx.toml
 
-# 3a. Start the live server
+# 2. Start the server
 ntx serve
 
-# 3b. Or generate a static site
-ntx generate --out ./out
+# 3. Sign in as root on the platform hostname (localhost by default)
+open http://localhost:8080/admin/login
 ```
 
+Then, in the admin:
+
+1. Under **sites**, choose **new site**. Give it a key (e.g. `mysite`), the
+   hostname it answers on (e.g. `mysite.localhost` locally, your domain in
+   production) and a theme.
+2. Visit `http://<hostname>:8080/admin/login` and sign in as root there to write
+   posts and edit that site's settings and sections.
+
+Sessions are bound to the hostname they were created on, so you sign in
+separately on the platform hostname and on each site.
+
 ## Configuration
+
+`ntx.toml` holds only server settings. Sites, sections, posts and people live in
+the database and are managed in the browser.
 
 Config is resolved in this order (later wins):
 
@@ -31,280 +43,159 @@ Config is resolved in this order (later wins):
 3. `./ntx.toml` in the working directory
 4. Built-in defaults
 
-### Global settings vs. per-site settings
+| Setting | Notes |
+|---|---|
+| `bind_addr` | empty = localhost only; `"0.0.0.0"` for all interfaces |
+| `port` | default 8080 |
+| `db_dsn` | `sqlite://./ntx.db` (default) or a `postgres://` URL; one database for every site |
+| `dev` | re-reads templates on every request; cookies without `Secure` |
+| `trusted_proxies` | CIDRs allowed to set `X-Forwarded-For` / `X-Forwarded-Proto` (your reverse proxy); default none |
+| `session_secret` | required, min 32 chars |
+| `encryption_key` | required, 32 random bytes base64-encoded; encrypts stored secrets |
+| `themes_path` | folder of themes, default `./themes` |
+| `platform_hostname` | required; bare hostname where root signs in before any site exists. No site may use it |
+| `root_password_hash` | required; bcrypt hash of root's password |
 
-A config file has two levels. Keys before the first `[[site]]` block configure
-the process; keys inside a `[[site]]` block configure one website. At least one
-`[[site]]` block is required.
+`gen-config` writes all of these with comments, generating `session_secret` and
+`encryption_key`. `ntx hash-password` prints a hash for `root_password_hash`
+(it reads one line from stdin when not on a terminal:
+`echo "$PW" | ntx hash-password`).
 
-| Setting | Level | Notes |
-|---|---|---|
-| `bind_addr` | global | empty = localhost only; `"0.0.0.0"` for all interfaces |
-| `port` | global | default 8080 |
-| `db_dsn` | global | one database for every site |
-| `session_secret` | global | required, min 32 chars |
-| `dev` | global | re-reads templates on every request |
-| `template_path` | global default | a site may override it |
-| `static_path` | global default | a site may override it |
-| `global_admin_password_hash` | global | optional; logs into every site's admin |
-| `key` | per site | stable identifier: lowercase letters, digits, `-`, `_` — see below |
-| `site_url` | per site | required; the bare hostname this site answers on (no scheme, port or path) |
-| `site_name`, `site_description` | per site | template variables |
-| `about_slug` | per site | `/about` redirects to `/blog/<about_slug>` |
-| `admin_password_hash` | per site | required, bcrypt |
-| `[[site.section]]` | per site | content sections; `blog`, `static`, `admin` and `about` are reserved slugs |
+### Coming from an earlier release
 
-### Full config reference
+There is no upgrade path. A config that still has `[[site]]`,
+`global_admin_password_hash`, `template_path` or `static_path` fails to load,
+naming the key. A database created by an earlier release fails to open with a
+message saying to delete it: delete `ntx.db` (and any `ntx.db-wal`/`ntx.db-shm`)
+and start fresh.
 
-```toml
-# Server
-bind_addr = ""      # empty = localhost only; "0.0.0.0" to listen on all interfaces
-port      = 8080
-dev       = false   # true: re-reads templates on every request; no caching
+## Root and the platform views
 
-# Paths — shared defaults; a [[site]] can override template_path/static_path
-static_path   = "./static"            # CSS, JS, images
-template_path = "./templates"         # HTML templates
-db_dsn        = "sqlite://./ntx.db"   # or postgres://user:pass@host/db
+`root` is the one built-in account. Its password lives only in config: it can't
+be changed, deleted or locked out from the browser. To change it, put a new
+`root_password_hash` in `ntx.toml` and restart; every existing root session ends.
 
-# Auth — required
-session_secret = ""  # random string, min 32 chars; auto-generated by ntx gen-config
+Sign-in failures are rate-limited per client IP (5 per 15 minutes, shared across
+all hostnames). Successful sign-ins don't count, and behind a reverse proxy the
+client IP comes from `X-Forwarded-For` only when the proxy is in
+`trusted_proxies`, so one attacker can't lock root out for everyone.
 
-# Optional: one hash that logs into every site's admin
-# global_admin_password_hash = ""
+The platform views (**sites**) list every site and create, edit and delete
+them. Deleting a site asks you to type its key and permanently removes its
+posts, tags, sections and sessions. Changing a site's hostname signs everyone
+out of it.
 
-# One block per website
-[[site]]
-key                 = "mysite"              # stable id; owns this site's posts/tags
-site_url            = "localhost"           # the Host header this site answers on
-site_name           = "mysite"              # default: "ntx"
-site_description    = "My personal site"
-about_slug          = "about"               # /about redirects to /blog/<this slug>
-admin_password_hash = ""                    # bcrypt hash; run: ntx gen-config -p  or  ntx hash-password
+## Sites
 
-  # Content sections, scoped to this site (repeat block for each section)
-  [[site.section]]
-  slug  = "projects"
-  title = "Projects"
-  pages = [
-    { slug = "one", title = "Project One" },
-    { slug = "two", title = "Project Two" },
-  ]
-```
+Requests are routed by matching the HTTP `Host` header (case-insensitive, port
+ignored) against each site's hostname. An unmatched host gets a plain 404,
+indistinguishable from a missing page. Behind a reverse proxy, forward the
+original host (`proxy_set_header Host $host;`), or nothing will resolve.
 
-### Serving several websites
+A site has:
 
-Add another `[[site]]` block. Both sites run in one process, share one
-database, and are told apart by the HTTP `Host` header:
+| Field | Notes |
+|---|---|
+| key | lowercase letters, digits, `-`, `_`; set once at creation; names its `ntx generate` output folder |
+| hostname | bare hostname (no scheme, port or path), unique |
+| name, description | template variables |
+| about slug | `/about` redirects to `/blog/<about slug>` |
+| theme | one of the folders in `themes_path` |
 
-```toml
-[[site]]
-key                 = "mysite"
-site_url            = "mysite.com"
-admin_password_hash = "..."
+Posts and tags are scoped per site, so two sites may use the same post slug or
+tag name independently.
 
-[[site]]
-key                 = "othersite"
-site_url            = "other.example.com"
-admin_password_hash = "..."
-template_path       = "./other-templates"   # optional; defaults to the global one
-static_path         = "./other-static"      # optional; defaults to the global one
-```
+## Themes
 
-Each site has its own posts, tags, admin password and admin session: a session
-minted on one site is not accepted on another. Posts and tags are scoped per
-site, so two sites may use the same post slug or tag name independently.
-
-**`site_url` is the routing key.** A request whose `Host` does not match any
-site's `site_url` gets a plain 404 — deliberately indistinguishable from a
-missing page, so one site's hostname reveals nothing about the others. The
-match is case-insensitive and ignores any `:port`, so `site_url` must be a bare
-hostname: `example.com`, not `https://example.com` or `example.com:8080`
-(both are rejected at startup). Behind a reverse proxy,
-forward the original host (`proxy_set_header Host $host;`), or nothing will
-resolve.
-
-**`key` must be stable.** It is what ties rows in the database to a site, and
-it names that site's output directory under `ntx generate`. Changing a key
-after a site has content orphans that content — the site's blog renders empty.
-On startup ntx logs a warning naming any orphaned site key that still owns
-posts or tags.
-
-### Duplicate settings are rejected at startup
-
-Two `[[site]]` blocks may not share a `key` or a `site_url` (compared
-case-insensitively); either one fails `ntx serve` immediately with a message
-naming the duplicate. A `key` must be lowercase letters, digits, `-` or `_`,
-since it names a directory under `ntx generate`. A section slug must be a
-single path segment and may not be `blog`, `static`, `admin` or `about`: every
-site's sections share one router, so such a slug would take over that route on
-every site. A malformed
-`admin_password_hash` or `global_admin_password_hash` is rejected the same way,
-rather than silently failing every login attempt later.
-
-### Generating secrets
-
-```bash
-# One-shot: generates config with random session_secret and hashed password
-ntx gen-config -p > ntx.toml
-
-# Separately, if needed:
-ntx hash-password    # prompts without echo, prints bcrypt hash
-```
-
-`gen-config` always emits a fresh random `session_secret`. The `-p` flag adds the bcrypt hash for the admin password so no manual copy-paste is required.
-
-## Template customization
-
-Templates live in `template_path` (default `./templates`), or in a site's own
-`template_path` if it sets one. Sites that don't override it share the global
-directory. The structure is the same either way:
+A theme is a folder under `themes_path`:
 
 ```
-templates/
-  base.html              # layout: nav, footer, <head>
-  home.html              # /
-  blog/
-    index.html           # /blog  (tag filter, post list)
-    post.html            # /blog/<slug>
-  sections/              # content sections (see below)
-    projects/
-      one/
-        index.html       # /projects/one
-  admin/
-    login.html           # /admin/login
-    posts.html           # /admin/posts
-    editor.html          # /admin/posts/new  and  /admin/posts/<id>/edit
+themes/
+  default/
+    templates/
+      base.html              # layout: nav, footer, <head>
+      home.html              # /
+      blog/
+        index.html           # /blog  (tag filter, post list)
+        post.html            # /blog/<slug>
+      sections/              # content sections (see below)
+        projects/
+          one/
+            index.html       # /projects/one
+    static/                  # served at /static/
+      css/main.css
+      assets/logo.svg
 ```
+
+Theme names follow the same rule as site keys. The list in the site form shows
+every folder under `themes_path` that has a `templates/` folder; the browser
+never supplies a path. Sites on the same theme share one parsed template cache.
+
+Admin pages (sign-in, posts, settings, sites) are built into the binary and are
+not themed, so they work even if a site's theme is missing or broken.
 
 ### Template data
 
-Every template receives these fields automatically (injected by the handler layer):
+Every theme template receives:
 
 | Field | Source | Example |
 |---|---|---|
-| `.SiteName` | the resolved site's `site_name` | `"nerdtx"` |
-| `.SiteURL` | the resolved site's `site_url` | `"nerdtx.net"` |
-| `.SiteDescription` | the resolved site's `site_description` | `"technical projects from deep in texas"` |
+| `.SiteName` | the resolved site's name | `"nerdtx"` |
+| `.SiteURL` | the resolved site's hostname | `"nerdtx.net"` |
+| `.SiteDescription` | the resolved site's description | `"technical projects from deep in texas"` |
 
-These come from whichever `[[site]]` block matched the request's `Host`, so the
-same template renders each site's own identity.
-
-Page-specific fields are merged in alongside these. Check each handler in `internal/handlers/` for what extra keys each route provides (e.g. `.Posts`, `.Post`, `.Rendered`).
-
-Section pages receive additional fields — see [Content sections](#content-sections) below.
+Page-specific fields are merged in alongside these: `/blog` gets `.Posts`,
+`.AllTags` and `.ActiveTag`; `/blog/<slug>` gets `.Post` and `.Rendered`.
+`.AllTags` lists only tags on published posts.
 
 ### Replacing the logo
 
-The default templates reference `/static/assets/logo.svg`. Drop your own SVG there, or change the `src` attribute in `base.html` and `home.html`.
-
-## Static files
-
-Anything under the resolved site's `static_path` is served at `/static/`. The default layout:
-
-```
-static/
-  css/
-    main.css
-  assets/
-    logo.svg
-```
-
-You can add JS, fonts, images, etc. freely.
+The shipped themes reference `/static/assets/logo.svg`. Drop your own SVG into
+the theme's `static/assets/`, or change the `src` in `base.html` and `home.html`.
 
 ## Blog posts
 
-Posts are written in Markdown (CommonMark + GitHub Flavored Markdown). Raw HTML in post bodies is stripped for safety. Create and edit posts via the admin UI at `/admin`.
-
-Posts belong to the site you are logged into. Log in on the hostname of the
-site you want to edit; each site's admin shows only its own posts.
+Posts are written in Markdown (CommonMark + GitHub Flavored Markdown). Raw HTML
+in post bodies is stripped for safety. Sign in on a site's hostname and use
+**posts**; each site's admin shows only its own posts.
 
 ## Content sections
 
-Sections are arbitrary URL namespaces backed by static templates. Each section maps a slug to a directory of per-page templates. There is no index route — every URL is a named page. Sections are defined per site, inside a `[[site]]` block.
+Sections are URL namespaces backed by theme templates. Each section maps a slug
+to a set of named pages; there is no index route. Edit a site's sections under
+**settings**, as a JSON list:
 
-### Defining a section
-
-```toml
-[[site]]
-key                 = "mysite"
-site_url            = "localhost"
-admin_password_hash = "..."
-
-  [[site.section]]
-  slug  = "projects"
-  title = "Projects"
-  pages = [
-    { slug = "one", title = "Project One" },
-    { slug = "two", title = "Project Two" },
-  ]
+```json
+[
+  {
+    "slug": "projects",
+    "title": "Projects",
+    "vars": {"banner": "hero.png"},
+    "pages": [
+      {"slug": "one", "title": "Project One", "vars": {"year": "2024"}},
+      {"slug": "two", "title": "Project Two"}
+    ]
+  }
+]
 ```
 
-This registers, on that site's hostname:
-- `GET /projects/one` → `templates/sections/projects/one/index.html`
+This serves, on that site's hostname:
+- `GET /projects/one` → the theme's `templates/sections/projects/one/index.html`
 - `GET /projects/two` → `templates/sections/projects/two/index.html`
 
-Unknown slugs 404 at the router level. A slug configured on one site but not
-another 404s on the site that didn't configure it.
-
-### Multiple sections
-
-```toml
-  [[site.section]]
-  slug  = "projects"
-  title = "Projects"
-  pages = [
-    { slug = "ctfkit", title = "CTFKit" },
-  ]
-
-  [[site.section]]
-  slug  = "writing"
-  title = "Writing"
-  pages = [
-    { slug = "on-go", title = "On Go" },
-  ]
-```
-
-### Extra variables
-
-Any key added to a `[[site.section]]` block or a page entry is available in the template, flattened into the top-level data:
-
-```toml
-  [[site.section]]
-  slug   = "projects"
-  title  = "Projects"
-  banner = "hero.png"           # available as {{ .banner }}
-  pages = [
-    { slug = "one", title = "Project One", year = "2024" },  # {{ .year }}
-  ]
-```
-
-Page-level vars override section-level vars with the same key. The standard site fields (`.SiteName`, `.SiteURL`, `.SiteDescription`) are always present.
+Section and page slugs must each be a single path segment (letters, digits,
+`.`, `-`, `_`). The section slugs `blog`, `static`, `admin`, `about`, `auth` and
+`invite` are reserved for built-in routes. A save with invalid JSON or an invalid
+slug is rejected and changes nothing. A page whose template is missing from the
+theme 404s.
 
 Section pages receive:
 
 | Field | Source |
 |---|---|
-| `.Title` | page `title` field |
-| `.SectionTitle` | section `title` field |
-| any extra key | extra vars from section or page (page wins on conflict) |
-
-### Template location
-
-```
-templates/
-  sections/
-    projects/
-      one/
-        index.html
-      two/
-        index.html
-    writing/
-      on-go/
-        index.html
-```
-
-Each `index.html` extends `base.html` in the usual way.
+| `.Title` | page `title` |
+| `.SectionTitle` | section `title` |
+| any `vars` key | section `vars`, then page `vars` (page wins on conflict) |
 
 ## Static site generation
 
@@ -318,8 +209,8 @@ ntx generate --config prod.toml --out ./dist
 
 ### What gets generated
 
-Every configured site is generated, each into its own subdirectory named after
-its `key`:
+Every site in the database is generated, in key order, each into its own
+subdirectory named after its key:
 
 | URL | Output file |
 |---|---|
@@ -329,8 +220,9 @@ its `key`:
 | `/<section>/<page>` | `out/<key>/<section>/<page>/index.html` |
 | `static/**` | `out/<key>/static/**` (copied verbatim) |
 
-So a config with `key = "mysite"` puts that site's deployable tree at
-`out/mysite/`, and each site is published independently.
+So a site with key `mysite` gets its deployable tree at `out/mysite/`, and
+each site is published independently. Only published posts, and only their
+tags, are included. `static/` comes from the site's theme.
 
 Admin routes are not generated. The `/about` redirect belongs in your web server config, not the static output.
 
@@ -381,8 +273,11 @@ WantedBy=multi-user.target
 ### Reverse proxy (nginx)
 
 `proxy_set_header Host $host;` is not optional: ntx picks the site from the
-`Host` header, so a proxy that rewrites it will make every request 404. Add one
-`server` block per site, all proxying to the same ntx port:
+`Host` header, so a proxy that rewrites it will make every request 404. Also
+forward the client address and scheme, and list the proxy's address in
+`trusted_proxies` (the default covers a proxy on the same machine). Add one
+`server` block per site, plus one for `platform_hostname`, all proxying to the
+same ntx port:
 
 ```nginx
 server {
@@ -392,18 +287,20 @@ server {
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 
 server {
     listen 443 ssl;
-    server_name other.example.com;
+    server_name admin.example.com;   # platform_hostname
 
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 ```
@@ -414,88 +311,11 @@ server {
 /usr/local/bin/ntx          # binary
 /etc/ntx/ntx.toml           # config (mode 600, owned by service user)
 /var/lib/ntx/ntx.db         # database — shared by every site
-/var/www/mysite/static/     # static files  → static_path
-/var/www/mysite/templates/  # templates     → template_path
+/var/lib/ntx/themes/        # themes        → themes_path
 ```
-
-Sites that override `template_path` or `static_path` get their own directories
-alongside these; sites that don't share the global ones.
 
 ## Dev mode
 
-Set `dev = true` (or `NTX_DEV=true`) to reload templates from disk on every request — no restart needed when editing HTML.
-
-## Upgrading from a single-site install
-
-Earlier versions served one website per process and took its settings at the
-root of `ntx.toml`. This release serves several, so those settings moved into a
-`[[site]]` block and the database gained a `sites` table. Upgrading needs a
-config edit, in this order.
-
-**1. Back up the database first.** This release migrates schema. Stop the
-server, then copy the file (`cp /var/lib/ntx/ntx.db /var/lib/ntx/ntx.db.bak`;
-with WAL enabled, copy the `-wal` and `-shm` files too, or use
-`sqlite3 ntx.db ".backup ntx.db.bak"`). For Postgres, take a `pg_dump`. The
-migration runs automatically on the next start, and a snapshot is the only
-reliable way back (see step 4).
-
-**2. Move the per-site settings into a `[[site]]` block.** `site_name`,
-`site_url`, `site_description`, `about_slug`, `admin_password_hash` and every
-`[[section]]` block were root-level; they are now per site. `[[section]]`
-becomes `[[site.section]]`. Everything else — `port`, `bind_addr`, `db_dsn`,
-`session_secret`, `dev`, `template_path`, `static_path` — stays at the root.
-
-Before:
-
-```toml
-site_name           = "mysite"
-site_url            = "mysite.com"
-site_description    = "My personal site."
-about_slug          = "about"
-admin_password_hash = "$2a$..."
-session_secret      = "..."
-port                = 8080
-
-[[section]]
-slug  = "projects"
-title = "Projects"
-pages = [{ slug = "one", title = "Project One" }]
-```
-
-After:
-
-```toml
-session_secret = "..."
-port           = 8080
-
-[[site]]
-key                 = "default"
-site_name           = "mysite"
-site_url            = "mysite.com"
-site_description    = "My personal site."
-about_slug          = "about"
-admin_password_hash = "$2a$..."
-
-  [[site.section]]
-  slug  = "projects"
-  title = "Projects"
-  pages = [{ slug = "one", title = "Project One" }]
-```
-
-**3. That block must use `key = "default"`.** The migration attaches all your
-existing posts and tags to a site whose key is `default`. Any other key creates
-a second, empty site: your blog renders with no posts and nothing fails. ntx
-logs a warning at startup if it finds a site in the database that owns content
-but matches no `[[site]]` block, naming the key to use — but setting
-`key = "default"` up front avoids the detour. (`ntx gen-config` emits
-`key = "mysite"`, which is right for a fresh install and wrong for an upgrade.)
-
-Once running, you can rename the site by editing `key`, but only before it has
-content under the new name — the key is what ties rows to a site.
-
-**4. Rolling back is effectively one-way.** The down migration recreates the
-old single-site schema, where post slugs and tag names are globally unique. It
-succeeds only while no two sites share a post slug and no two share a tag name
-— exactly what multi-tenancy permits. Once a second site has content, the
-rollback aborts (cleanly, inside a transaction, leaving your data intact) and
-restoring the step-1 snapshot is the way back.
+Set `dev = true` (or `NTX_DEV=true`) to reload theme templates from disk on every
+request, so no restart is needed when editing HTML. Dev mode also drops the
+`Secure` flag from cookies, so sign-in works over plain `http://localhost`.
