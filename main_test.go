@@ -1,12 +1,18 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/nod/ntx/internal/config"
+	"github.com/nod/ntx/internal/db"
+	"github.com/nod/ntx/internal/models"
+	"github.com/nod/ntx/internal/secretbox"
+	"github.com/nod/ntx/internal/server"
 )
 
 // realBcryptHash is a genuine bcrypt hash (of "testpass"); config.Load
@@ -83,5 +89,56 @@ func TestHashRootPasswordRejectsEmpty(t *testing.T) {
 	hash, err := hashRootPassword("s3cret")
 	if err != nil || !strings.HasPrefix(hash, "$2") {
 		t.Errorf("a real password must hash: %q, %v", hash, err)
+	}
+}
+
+// openApp must wire every dependency sign-in needs: /auth/start on a site
+// with a provider reaches the provider (here unreachable: 502), instead of
+// tripping over a nil store or client (500).
+func TestOpenAppWiresSignIn(t *testing.T) {
+	cfgFile := genConfigFile(t, realBcryptHash)
+	t.Setenv("NTX_DB_DSN", "sqlite://"+filepath.Join(t.TempDir(), "t.db"))
+	themesDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(themesDir, "t1", "templates"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NTX_THEMES_PATH", themesDir)
+	cfg, err := config.Load(cfgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := db.Open(cfg.DBDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sites := models.NewSiteStore(d)
+	site := &models.Site{Key: "a", Hostname: "a.example.com", Theme: "t1"}
+	if err := sites.Create(site, cfg.PlatformHostname); err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := secretbox.Seal(cfg.EncryptionKey, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sites.SetProvider(site.ID, models.ProviderSettings{Type: models.ProviderAuth0, Domain: "tenant.invalid", ClientID: "cid"}, sealed); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := d.DB(); s != nil {
+		s.Close()
+	}
+
+	a, err := openApp(cfgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(a.close)
+	req := httptest.NewRequest(http.MethodGet, "/auth/start", nil)
+	req.Host = "a.example.com"
+	rec := httptest.NewRecorder()
+	server.New(a.cfg, a.handler, a.registry, a.auth).Handler.ServeHTTP(rec, req)
+	// Not the "re-enter the client secret" 502: that would mean the
+	// encryption key wasn't wired.
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "reach the sign-in provider") {
+		t.Fatalf("/auth/start through openApp: %d %s", rec.Code, rec.Body.String())
 	}
 }

@@ -75,6 +75,9 @@ and start fresh.
 be changed, deleted or locked out from the browser. To change it, put a new
 `root_password_hash` in `ntx.toml` and restart; every existing root session ends.
 
+The request log never shows invite tokens (`/invite/[redacted]`) or the
+provider's code (`/auth/callback` is logged without its query).
+
 Sign-in failures are rate-limited per client IP (5 per 15 minutes, shared across
 all hostnames). Successful sign-ins don't count, and behind a reverse proxy the
 client IP comes from `X-Forwarded-For` only when the proxy is in
@@ -84,6 +87,72 @@ The platform views (**sites**) list every site and create, edit and delete
 them. Deleting a site asks you to type its key and permanently removes its
 posts, tags, sections and sessions. Changing a site's hostname signs everyone
 out of it.
+
+## People and roles
+
+Everyone except root signs in through a site's provider, and only if they hold
+a membership on that site. A Google or Auth0 login on its own grants nothing.
+
+| Role | Where | Can |
+|---|---|---|
+| root | everywhere | everything; password in config, can't be changed or deleted from the web |
+| platform admin | the site they sign in on, plus the platform views | everything root can, except change root |
+| site admin | one site | posts (anyone's), members, settings |
+| contributor | one site | their own posts; publishing only with **can publish** |
+
+- **Contributors without can publish** write drafts and edit or delete their own
+  drafts. They can't publish, and once one of their posts has been published
+  (by a site admin), they can no longer edit it.
+- **Contributors with can publish** publish, unpublish, edit and delete their own posts.
+- **Contributors** see only their own posts in the admin.
+- **Platform admins** sign in through the provider of a site where they are a member,
+  and from there use **sites** and **users** like root. Revoking the flag, removing
+  the membership or deleting the person takes effect on their next request.
+
+### Setting up a site's sign-in provider
+
+Root or a platform admin edits the site under **sites** and picks a provider:
+
+- **Google:** in the Google Cloud console, create an OAuth client ID (type
+  "Web application"). Add the callback URL shown on the site's page
+  (`https://<hostname>/auth/callback`) as an authorised redirect URI. Enter the
+  client ID and secret.
+- **Auth0:** create a "Regular Web Application". Add the callback URL to
+  *Allowed Callback URLs*. Enter the tenant domain (e.g. `acme.us.auth0.com`),
+  the client ID and the client secret.
+
+ntx asks for the `openid email profile` scopes and only accepts emails the
+provider has verified. The client secret is encrypted with `encryption_key` and
+never shown again; the form says whether one is stored. Changing the provider,
+domain or client ID requires entering the secret again. If you change
+`encryption_key`, re-enter every site's client secret.
+
+### Members and invites
+
+On a site, **members** lists its people and pending invites. Site admins (and
+root and platform admins) can:
+
+- **Add** someone by email: they get access straight away and are matched by
+  that email the first time they sign in.
+- **Invite** someone: ntx shows a link once, for you to copy and send. It works
+  for 7 days, on that site only, and only for someone signing in with the invited
+  email. **New link** replaces it; **cancel** withdraws it.
+- Change a member's role or **can publish**, or remove them. Their posts stay.
+
+Site admins can't change or remove a platform admin's membership.
+
+### Platform users
+
+**users** (root and platform admins) lists everyone across all sites. A
+person's page can grant or revoke platform admin, change their email, add or
+remove site memberships, unlink a sign-in identity (their next sign-in matches
+by email again), sign them out everywhere, or delete them. Deleted people's
+posts stay, shown as by a "former member". Root has no controls there.
+
+A person who already has a login at a provider can't be linked to a second,
+different login from the same provider (a reused or reassigned mailbox). They
+get "You don't have access to this site" until a platform admin unlinks the old
+identity.
 
 ## Sites
 
