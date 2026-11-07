@@ -230,7 +230,7 @@ func (h *Handler) RequireSiteAdmin(next http.Handler) http.Handler {
 			h.notFound(w)
 		case a == nil:
 			http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
-		case !a.CanAdminSite():
+		case !(a.IsPlatform() || (a.Membership != nil && a.Membership.Role == models.RoleAdmin)):
 			http.Error(w, "Forbidden", http.StatusForbidden)
 		default:
 			next.ServeHTTP(w, r)

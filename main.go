@@ -220,7 +220,7 @@ func openApp(cfgFile string) (*app, error) {
 		closeDB()
 		return nil, fmt.Errorf("loading sites: %w", err)
 	}
-	am := auth.NewManager(models.NewSessionStore(database), users, cfg.RootPasswordHash, !cfg.Dev)
+	am := auth.NewManager(models.NewSessionStore(database), users, models.NewMembershipStore(database), cfg.RootPasswordHash, !cfg.Dev)
 	h := handlers.New(handlers.Deps{
 		Sites:            sites,
 		Posts:            models.NewPostStore(database),

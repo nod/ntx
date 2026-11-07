@@ -86,7 +86,7 @@ func setup(t *testing.T) *env {
 		PlatformHostname: platformHost,
 		RootPasswordHash: rootHash,
 	}
-	am := auth.NewManager(models.NewSessionStore(d), users, rootHash, false)
+	am := auth.NewManager(models.NewSessionStore(d), users, models.NewMembershipStore(d), rootHash, false)
 	posts := models.NewPostStore(d)
 	h := handlers.New(handlers.Deps{
 		Sites: sites, Posts: posts, Users: users, Registry: reg, Auth: am,

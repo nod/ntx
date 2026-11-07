@@ -42,6 +42,10 @@ func RootDigest(hash string) string {
 type Actor struct {
 	User    *models.User
 	Session *models.Session
+	// Membership is the user's current membership on the session's site:
+	// nil for root, set for everyone else (a session without one is
+	// invalid).
+	Membership *models.Membership
 }
 
 func (a *Actor) IsRoot() bool { return a != nil && a.User.IsRoot }
@@ -49,19 +53,16 @@ func (a *Actor) IsRoot() bool { return a != nil && a.User.IsRoot }
 // IsPlatform reports root or platform-admin powers.
 func (a *Actor) IsPlatform() bool { return a != nil && (a.User.IsRoot || a.User.IsPlatformAdmin) }
 
-// CanAdminSite reports site-admin powers on the site the session is for.
-// Phase 1 has no memberships, so only platform powers grant it.
-func (a *Actor) CanAdminSite() bool { return a.IsPlatform() }
-
 type Manager struct {
-	sessions   *models.SessionStore
-	users      *models.UserStore
-	rootDigest string
+	sessions    *models.SessionStore
+	users       *models.UserStore
+	memberships *models.MembershipStore
+	rootDigest  string
 	secure     bool
 }
 
-func NewManager(sessions *models.SessionStore, users *models.UserStore, rootPasswordHash string, secure bool) *Manager {
-	return &Manager{sessions: sessions, users: users, rootDigest: RootDigest(rootPasswordHash), secure: secure}
+func NewManager(sessions *models.SessionStore, users *models.UserStore, memberships *models.MembershipStore, rootPasswordHash string, secure bool) *Manager {
+	return &Manager{sessions: sessions, users: users, memberships: memberships, rootDigest: RootDigest(rootPasswordHash), secure: secure}
 }
 
 // Login starts a session for user on the current host -- siteID is the
@@ -145,12 +146,22 @@ func (m *Manager) actor(r *http.Request, current func(*http.Request) (int64, boo
 	if err != nil || user == nil {
 		return nil
 	}
-	// Phase 1: only root can hold a session. Phase 2 adds members, whose
-	// sessions also need a current membership on the session's site.
-	if !user.IsRoot || sess.RootHashDigest != m.rootDigest {
+	if user.IsRoot {
+		if sess.RootHashDigest != m.rootDigest {
+			return nil
+		}
+		return &Actor{User: user, Session: sess}
+	}
+	// Everyone else needs a current membership on the session's own site,
+	// platform admins included, so removing it takes effect right away.
+	if sess.SiteID == nil {
 		return nil
 	}
-	return &Actor{User: user, Session: sess}
+	mem, err := m.memberships.Get(user.ID, *sess.SiteID)
+	if err != nil || mem == nil {
+		return nil
+	}
+	return &Actor{User: user, Session: sess, Membership: mem}
 }
 
 // ActorFrom returns the request's Actor, or nil if it is anonymous.

@@ -25,8 +25,10 @@ func TestHashAndCheck(t *testing.T) {
 type env struct {
 	sessions *models.SessionStore
 	users    *models.UserStore
+	mems     *models.MembershipStore
 	root     *models.User
 	siteID   int64
+	siteB    int64
 }
 
 func newEnv(t *testing.T) *env {
@@ -45,15 +47,31 @@ func newEnv(t *testing.T) *env {
 	if err := models.NewSiteStore(d).Create(site, "admin.example.com"); err != nil {
 		t.Fatal(err)
 	}
-	// A non-root user, inserted directly: phase 1 has no way to create one.
-	if err := d.Exec("INSERT INTO users (id, email, name, is_root, is_platform_admin, created_at) VALUES (50, 'x@example.com', 'x', 0, 1, CURRENT_TIMESTAMP)").Error; err != nil {
+	siteB := &models.Site{Key: "b", Hostname: "b.example.com", Theme: "default"}
+	if err := models.NewSiteStore(d).Create(siteB, "admin.example.com"); err != nil {
 		t.Fatal(err)
 	}
-	return &env{sessions: models.NewSessionStore(d), users: users, root: root, siteID: site.ID}
+	return &env{sessions: models.NewSessionStore(d), users: users, mems: models.NewMembershipStore(d), root: root, siteID: site.ID, siteB: siteB.ID}
 }
 
 func (e *env) manager(rootHash string) *Manager {
-	return NewManager(e.sessions, e.users, rootHash, true)
+	return NewManager(e.sessions, e.users, e.mems, rootHash, true)
+}
+
+// person creates a user with email and, if role is set, a membership on
+// site A.
+func (e *env) person(t *testing.T, email, role string) *models.User {
+	t.Helper()
+	u, err := e.users.FindOrCreateByEmail(email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if role != "" {
+		if err := e.mems.Add(u.ID, e.siteID, role, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return u
 }
 
 // login signs user in through m and returns the session cookie.
@@ -93,7 +111,7 @@ func TestRootSessionValidOnIssuingSiteOnly(t *testing.T) {
 	m := e.manager(hash1)
 	c := login(t, m, e.root, &e.siteID)
 
-	if a := actorFor(m, c, e.siteID, true); a == nil || !a.IsRoot() || !a.IsPlatform() || !a.CanAdminSite() {
+	if a := actorFor(m, c, e.siteID, true); a == nil || !a.IsRoot() || !a.IsPlatform() || a.Membership != nil {
 		t.Fatalf("root session on its own site: got %+v", a)
 	}
 	if a := actorFor(m, c, e.siteID+1, true); a != nil {
@@ -130,7 +148,7 @@ func TestRootSessionInvalidAfterPasswordChange(t *testing.T) {
 func TestCookieAttributes(t *testing.T) {
 	e := newEnv(t)
 	for _, secure := range []bool{true, false} {
-		m := NewManager(e.sessions, e.users, hash1, secure)
+		m := NewManager(e.sessions, e.users, e.mems, hash1, secure)
 		c := login(t, m, e.root, &e.siteID)
 		if !c.HttpOnly || c.SameSite != http.SameSiteStrictMode || c.Path != "/" || c.Domain != "" || c.Secure != secure {
 			t.Errorf("secure=%v: unexpected cookie attributes %+v", secure, c)
@@ -162,18 +180,97 @@ func TestLogoutDeletesSession(t *testing.T) {
 	}
 }
 
-// Phase 1 has no members: a session belonging to anyone but root is
-// invalid, platform admin flag or not.
-func TestNonRootSessionRejectedInPhase1(t *testing.T) {
+func TestMemberSessionValidWithMembership(t *testing.T) {
 	e := newEnv(t)
 	m := e.manager(hash1)
-	other, err := e.users.GetByID(50)
-	if err != nil || other == nil {
+	u := e.person(t, "c@x.io", models.RoleContributor)
+	a := actorFor(m, login(t, m, u, &e.siteID), e.siteID, true)
+	if a == nil || a.Membership == nil || a.Membership.Role != models.RoleContributor || a.IsPlatform() {
+		t.Fatalf("actor = %+v", a)
+	}
+}
+
+func TestMemberSessionInvalidAfterRemoval(t *testing.T) {
+	e := newEnv(t)
+	m := e.manager(hash1)
+	u := e.person(t, "c@x.io", models.RoleContributor)
+	c := login(t, m, u, &e.siteID)
+	if err := e.mems.Remove(u.ID, e.siteID); err != nil {
 		t.Fatal(err)
 	}
-	c := login(t, m, other, &e.siteID)
 	if a := actorFor(m, c, e.siteID, true); a != nil {
-		t.Errorf("a non-root session must not authenticate in phase 1, got %+v", a)
+		t.Fatalf("session still valid after the membership was removed: %+v", a)
+	}
+}
+
+func TestPlatformAdminNeedsMembership(t *testing.T) {
+	e := newEnv(t)
+	m := e.manager(hash1)
+	u := e.person(t, "p@x.io", "")
+	if err := e.users.SetPlatformAdmin(u.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	u, _ = e.users.GetByID(u.ID)
+	if a := actorFor(m, login(t, m, u, &e.siteID), e.siteID, true); a != nil {
+		t.Fatalf("a platform admin with no membership here authenticated: %+v", a)
+	}
+}
+
+func TestPlatformFlagReadEachRequest(t *testing.T) {
+	e := newEnv(t)
+	m := e.manager(hash1)
+	u := e.person(t, "p@x.io", models.RoleContributor)
+	if err := e.users.SetPlatformAdmin(u.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	c := login(t, m, u, &e.siteID)
+	if a := actorFor(m, c, e.siteID, true); !a.IsPlatform() {
+		t.Fatal("platform admin not recognised")
+	}
+	if err := e.users.SetPlatformAdmin(u.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if a := actorFor(m, c, e.siteID, true); a == nil || a.IsPlatform() {
+		t.Fatalf("after revoking, actor = %+v; want a plain member", a)
+	}
+}
+
+func TestMemberSessionOtherSiteInvalid(t *testing.T) {
+	e := newEnv(t)
+	m := e.manager(hash1)
+	u := e.person(t, "c@x.io", models.RoleContributor)
+	if err := e.mems.Add(u.ID, e.siteB, models.RoleAdmin, false); err != nil {
+		t.Fatal(err)
+	}
+	if a := actorFor(m, login(t, m, u, &e.siteID), e.siteB, true); a != nil {
+		t.Fatalf("a site-A session authenticated on site B: %+v", a)
+	}
+}
+
+func TestMemberSessionNilSiteInvalid(t *testing.T) {
+	e := newEnv(t)
+	m := e.manager(hash1)
+	u := e.person(t, "c@x.io", models.RoleAdmin)
+	if err := e.users.SetPlatformAdmin(u.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	u, _ = e.users.GetByID(u.ID)
+	c := login(t, m, u, nil)
+	if a := actorFor(m, c, 0, false); a != nil {
+		t.Fatalf("a member session with no site authenticated on the platform host: %+v", a)
+	}
+}
+
+func TestDeletedUserSessionInvalid(t *testing.T) {
+	e := newEnv(t)
+	m := e.manager(hash1)
+	u := e.person(t, "c@x.io", models.RoleContributor)
+	c := login(t, m, u, &e.siteID)
+	if err := e.users.Delete(u.ID); err != nil {
+		t.Fatal(err)
+	}
+	if a := actorFor(m, c, e.siteID, true); a != nil {
+		t.Fatalf("deleted user's session authenticated: %+v", a)
 	}
 }
 

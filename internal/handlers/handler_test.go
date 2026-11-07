@@ -80,7 +80,7 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	rootHash, _ := auth.HashPassword("rootpass")
-	am := auth.NewManager(models.NewSessionStore(d), users, rootHash, false)
+	am := auth.NewManager(models.NewSessionStore(d), users, models.NewMembershipStore(d), rootHash, false)
 	h := New(Deps{
 		Sites: sites, Posts: models.NewPostStore(d), Users: users, Registry: reg,
 		Auth: am, Limiter: auth.NewLimiter(), ThemesPath: themesRoot,
