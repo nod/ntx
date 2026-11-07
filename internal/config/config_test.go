@@ -332,3 +332,102 @@ func TestEnvVarOverride(t *testing.T) {
 		t.Errorf("env override: want port 9090, got %d", cfg.Port)
 	}
 }
+
+// siteTOML renders a config with one [[site]] block per (key, site_url)
+// pair, plus any extra TOML appended verbatim after the last block (so a
+// [[site.section]] lands on the last site).
+func siteTOML(pairs [][2]string, extra string) string {
+	out := "session_secret = \"supersecretkey1234567890abcdef12\"\n"
+	for _, p := range pairs {
+		out += "\n[[site]]\nkey = \"" + p[0] + "\"\nsite_url = \"" + p[1] + "\"\nadmin_password_hash = \"" + validHash + "\"\n"
+	}
+	return out + extra
+}
+
+// resolveSite lowercases the Host header before matching, so two site_urls
+// differing only in case are the same routing key: the later one would
+// silently shadow the earlier.
+func TestDuplicateSiteURLIsCaseInsensitive(t *testing.T) {
+	f := writeTOML(t, siteTOML([][2]string{{"a", "Dup.example.com"}, {"b", "dup.example.com"}}, ""))
+	if _, err := Load(f); err == nil {
+		t.Error("expected error for site_urls differing only in case")
+	}
+}
+
+// resolveSite matches a bare hostname (port stripped, no scheme), so any
+// site_url carrying a scheme, port or path can never match a request.
+func TestSiteURLMustBeBareHostname(t *testing.T) {
+	for _, u := range []string{
+		"https://example.com",
+		"http://example.com",
+		"example.com:8080",
+		"example.com/blog",
+		"example.com/",
+		"exa mple.com",
+	} {
+		f := writeTOML(t, siteTOML([][2]string{{"a", u}}, ""))
+		if _, err := Load(f); err == nil {
+			t.Errorf("site_url %q: expected error, got nil", u)
+		}
+	}
+}
+
+func TestSiteURLBareHostnamesAccepted(t *testing.T) {
+	for _, u := range []string{"localhost", "example.com", "Example.COM", "sub.example.co.uk", "127.0.0.1", "::1"} {
+		f := writeTOML(t, siteTOML([][2]string{{"a", u}}, ""))
+		if _, err := Load(f); err != nil {
+			t.Errorf("site_url %q: unexpected error: %v", u, err)
+		}
+	}
+}
+
+// key names the site's `ntx generate` output directory, so it must be a
+// single, case-normalised path segment: no traversal, no separators, and
+// no two keys that collide on a case-insensitive filesystem.
+func TestSiteKeyMustBeSafeDirName(t *testing.T) {
+	for _, k := range []string{"../www", "a/b", `a\b`, "..", ".", "Blog", " a", "a b", ".hidden"} {
+		f := writeTOML(t, siteTOML([][2]string{{k, "a.example.com"}}, ""))
+		if _, err := Load(f); err == nil {
+			t.Errorf("key %q: expected error, got nil", k)
+		}
+	}
+}
+
+func TestSiteKeySafeNamesAccepted(t *testing.T) {
+	for _, k := range []string{"mysite", "my-site", "my_site", "site2", "default", "2nd"} {
+		f := writeTOML(t, siteTOML([][2]string{{k, "a.example.com"}}, ""))
+		if _, err := Load(f); err != nil {
+			t.Errorf("key %q: unexpected error: %v", k, err)
+		}
+	}
+}
+
+// Section slugs from every site share one router, so a slug that collides
+// with a built-in route prefix would hijack that route on every site.
+func TestReservedSectionSlugErrors(t *testing.T) {
+	for _, slug := range []string{"blog", "static", "admin", "about"} {
+		f := writeTOML(t, siteTOML([][2]string{{"a", "a.example.com"}},
+			"\n[[site.section]]\nslug = \""+slug+"\"\n"))
+		if _, err := Load(f); err == nil {
+			t.Errorf("section slug %q: expected error, got nil", slug)
+		}
+	}
+}
+
+func TestMalformedSectionSlugErrors(t *testing.T) {
+	for _, slug := range []string{"", "a/b", "a b", "..", "{page}", "*"} {
+		f := writeTOML(t, siteTOML([][2]string{{"a", "a.example.com"}},
+			"\n[[site.section]]\nslug = \""+slug+"\"\n"))
+		if _, err := Load(f); err == nil {
+			t.Errorf("section slug %q: expected error, got nil", slug)
+		}
+	}
+}
+
+func TestOrdinarySectionSlugAccepted(t *testing.T) {
+	f := writeTOML(t, siteTOML([][2]string{{"a", "a.example.com"}},
+		"\n[[site.section]]\nslug = \"projects\"\n"))
+	if _, err := Load(f); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}

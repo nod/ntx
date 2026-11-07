@@ -47,12 +47,12 @@ the process; keys inside a `[[site]]` block configure one website. At least one
 | `template_path` | global default | a site may override it |
 | `static_path` | global default | a site may override it |
 | `global_admin_password_hash` | global | optional; logs into every site's admin |
-| `key` | per site | stable identifier — see below |
-| `site_url` | per site | required; the Host header this site answers on |
+| `key` | per site | stable identifier: lowercase letters, digits, `-`, `_` — see below |
+| `site_url` | per site | required; the bare hostname this site answers on (no scheme, port or path) |
 | `site_name`, `site_description` | per site | template variables |
 | `about_slug` | per site | `/about` redirects to `/blog/<about_slug>` |
 | `admin_password_hash` | per site | required, bcrypt |
-| `[[site.section]]` | per site | content sections |
+| `[[site.section]]` | per site | content sections; `blog`, `static`, `admin` and `about` are reserved slugs |
 
 ### Full config reference
 
@@ -118,7 +118,9 @@ site, so two sites may use the same post slug or tag name independently.
 **`site_url` is the routing key.** A request whose `Host` does not match any
 site's `site_url` gets a plain 404 — deliberately indistinguishable from a
 missing page, so one site's hostname reveals nothing about the others. The
-match is case-insensitive and ignores any `:port`. Behind a reverse proxy,
+match is case-insensitive and ignores any `:port`, so `site_url` must be a bare
+hostname: `example.com`, not `https://example.com` or `example.com:8080`
+(both are rejected at startup). Behind a reverse proxy,
 forward the original host (`proxy_set_header Host $host;`), or nothing will
 resolve.
 
@@ -130,8 +132,13 @@ posts or tags.
 
 ### Duplicate settings are rejected at startup
 
-Two `[[site]]` blocks may not share a `key` or a `site_url`; either one fails
-`ntx serve` immediately with a message naming the duplicate. A malformed
+Two `[[site]]` blocks may not share a `key` or a `site_url` (compared
+case-insensitively); either one fails `ntx serve` immediately with a message
+naming the duplicate. A `key` must be lowercase letters, digits, `-` or `_`,
+since it names a directory under `ntx generate`. A section slug must be a
+single path segment and may not be `blog`, `static`, `admin` or `about`: every
+site's sections share one router, so such a slug would take over that route on
+every site. A malformed
 `admin_password_hash` or `global_admin_password_hash` is rejected the same way,
 rather than silently failing every login attempt later.
 

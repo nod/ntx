@@ -50,9 +50,7 @@ func writeTemplates(t *testing.T, dir string) {
 // TestNewRejectsSiteWithoutDatabaseID guards Ruling 10 at the place the
 // collapse actually happens. Handler.sites is keyed by site.ID, so a set of
 // sites that never went through models.EnsureSites all carry ID 0 and fold
-// into a single map entry; 0 is also auth.GlobalSiteID, so every site-scoped
-// session would authenticate everywhere. server.New checks this as well, but
-// `generate` calls handlers.New directly and never touches server.New.
+// into a single map entry. Both server.New and `generate` rely on this check.
 func TestNewRejectsSiteWithoutDatabaseID(t *testing.T) {
 	database := newTestDB(t)
 	tmpDir := t.TempDir()
@@ -170,6 +168,42 @@ func TestGenerateIsolatesSiteOutput(t *testing.T) {
 		}
 		if !strings.Contains(string(home), "home of "+tc.name) {
 			t.Errorf("site %q: home page should name the site, got: %s", tc.key, home)
+		}
+	}
+}
+
+// TestGenerateRunsSitesInConfigOrder: when a later site fails, every site
+// before it in the config must already have been written -- the same
+// partial output on every run, not whatever order a map happens to yield.
+func TestGenerateRunsSitesInConfigOrder(t *testing.T) {
+	database := newTestDB(t)
+	goodDir := t.TempDir()
+	writeTemplates(t, goodDir)
+	brokenDir := t.TempDir() // no templates at all: generating this site fails
+
+	hash, _ := auth.HashPassword("testpass")
+	sites := []config.Site{
+		{Key: "a", SiteURL: "a.example.com", TemplatePath: goodDir, StaticPath: goodDir, AdminPasswordHash: hash},
+		{Key: "b", SiteURL: "b.example.com", TemplatePath: goodDir, StaticPath: goodDir, AdminPasswordHash: hash},
+		{Key: "c", SiteURL: "c.example.com", TemplatePath: goodDir, StaticPath: goodDir, AdminPasswordHash: hash},
+		{Key: "broken", SiteURL: "broken.example.com", TemplatePath: brokenDir, StaticPath: brokenDir, AdminPasswordHash: hash},
+	}
+	if err := models.EnsureSites(database, sites); err != nil {
+		t.Fatal(err)
+	}
+	session := auth.NewSessionManager("testsecretkey12345678901234567890", false)
+	h, err := New(sites, models.NewPostStore(database), session, true, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(t.TempDir(), "out")
+	if err := h.Generate(outDir); err == nil {
+		t.Fatal("expected Generate to fail on the site with no templates")
+	}
+	for _, key := range []string{"a", "b", "c"} {
+		if _, err := os.Stat(filepath.Join(outDir, key, "index.html")); err != nil {
+			t.Errorf("site %q precedes the failing site in config, so it must have been generated: %v", key, err)
 		}
 	}
 }

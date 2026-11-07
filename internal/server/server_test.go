@@ -789,10 +789,10 @@ func TestHostMatchIgnoresPort(t *testing.T) {
 }
 
 // TestServerNewRejectsSitesWithoutDatabaseID guards addendum Ruling 10: if
-// EnsureSites was never run, every site's ID is the zero value, which
-// equals auth.GlobalSiteID — and a site-scoped session would silently
-// authenticate on every site. server.New must fail fast instead. This is
-// the one test in this file that must NOT call models.EnsureSites.
+// EnsureSites was never run, every site's ID is the zero value and the
+// per-site handlers would collapse into one. server.New must fail fast
+// instead. This is the one test in this file that must NOT call
+// models.EnsureSites.
 func TestServerNewRejectsSitesWithoutDatabaseID(t *testing.T) {
 	database, err := db.Open("sqlite://:memory:")
 	if err != nil {
@@ -832,6 +832,88 @@ func TestServerNewRejectsSitesWithoutDatabaseID(t *testing.T) {
 	_, err = New(cfg, rawPosts, session)
 	if err == nil {
 		t.Fatal("expected error for site with unpopulated database id, got nil")
+	}
+}
+
+// TestServerNewRejectsReservedSectionSlug: every site's section slugs are
+// registered on one shared router, and chi lets a later /blog/{page} win
+// over /blog/{slug}. One site configuring a "blog" section would 404 every
+// other site's posts. config.Load rejects this, but server.New takes a
+// Config directly, so it must refuse too.
+func TestServerNewRejectsReservedSectionSlug(t *testing.T) {
+	database, err := db.Open("sqlite://:memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		sqlDB, _ := database.DB()
+		sqlDB.Close()
+	})
+	tmpDir := t.TempDir()
+	setupTemplates(t, tmpDir)
+
+	hash, _ := auth.HashPassword("testpass")
+	sites := []config.Site{
+		{Key: "a", SiteURL: "a.example.com", TemplatePath: tmpDir, StaticPath: tmpDir, AdminPasswordHash: hash,
+			Sections: []config.Section{{Slug: "blog"}}},
+		{Key: "b", SiteURL: "b.example.com", TemplatePath: tmpDir, StaticPath: tmpDir, AdminPasswordHash: hash},
+	}
+	if err := models.EnsureSites(database, sites); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{SessionSecret: "testsecretkey12345678901234567890", Dev: true, Sites: sites}
+
+	if _, err := New(cfg, models.NewPostStore(database), auth.NewSessionManager(cfg.SessionSecret, false)); err == nil {
+		t.Fatal("expected server.New to reject a section slug that shadows /blog, got nil")
+	}
+}
+
+// TestGlobalAdminGuessesShareOneBudgetAcrossSites: every site's login form
+// also accepts the global admin password, so if the only limit were per
+// site, N sites would give one IP 5*N guesses at the one credential that
+// unlocks all of them. Wrong guesses must also drain a per-IP budget for
+// the global password that every site shares.
+func TestGlobalAdminGuessesShareOneBudgetAcrossSites(t *testing.T) {
+	globalHash, _ := auth.HashPassword("globalpass")
+	ts, _, _ := setupTwoSiteServer(t, globalHash)
+	client := noRedirectClient()
+
+	for i := 0; i < 5; i++ {
+		resp := postLogin(t, client, ts.URL, "a.example.com", "wrongpass")
+		resp.Body.Close()
+	}
+
+	// Site B's own budget is untouched, but the global password has already
+	// had its 5 guesses from this IP: it must not be tried again.
+	resp := postLogin(t, client, ts.URL, "b.example.com", "globalpass")
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusSeeOther {
+		t.Fatal("global admin password was accepted on site B after 5 failed guesses on site A from the same IP")
+	}
+	if !strings.Contains(string(body), "Too many attempts") {
+		t.Errorf("expected a rate-limit message, got: %s", body)
+	}
+}
+
+// TestSitePasswordStillWorksWhenGlobalBudgetIsSpent keeps the per-site
+// independence TestLoginLimiterIsPerSite asserts: draining the shared
+// global-password budget via site A must not lock site B's own admin out.
+func TestSitePasswordStillWorksWhenGlobalBudgetIsSpent(t *testing.T) {
+	globalHash, _ := auth.HashPassword("globalpass")
+	ts, _, _ := setupTwoSiteServer(t, globalHash)
+	client := noRedirectClient()
+
+	for i := 0; i < 5; i++ {
+		resp := postLogin(t, client, ts.URL, "a.example.com", "wrongpass")
+		resp.Body.Close()
+	}
+
+	resp := postLogin(t, client, ts.URL, "b.example.com", "passB")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("site B's own password must still work, got %d: %s", resp.StatusCode, body)
 	}
 }
 

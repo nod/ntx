@@ -24,8 +24,10 @@ func newLoginLimiter() *loginLimiter {
 }
 
 // allow returns true if key is under the threshold (5 attempts per 15
-// minutes). key is "<siteID>:<ip>" so one site's brute-force lockout
-// doesn't collaterally lock out login attempts on another site.
+// minutes). Site passwords are limited under "<siteID>:<ip>" so one site's
+// brute-force lockout doesn't collaterally lock out another site; the global
+// admin password, which every site's form accepts, is limited under
+// "global:<ip>" so its guesses share one budget across all sites.
 func (l *loginLimiter) allow(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -69,18 +71,29 @@ func (h *Handler) AdminLoginPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	password := r.FormValue("password")
-	switch {
-	case auth.CheckPassword(sh.site.AdminPasswordHash, password) == nil:
-		h.session.SetSession(w, sh.site.ID)
-	case h.globalAdminHash != "" && auth.CheckPassword(h.globalAdminHash, password) == nil:
-		h.session.SetSession(w, auth.GlobalSiteID)
-	default:
-		h.render(w, r, "admin/login.html", map[string]interface{}{
-			"Error": "Invalid password.",
-		})
+	if auth.CheckPassword(sh.site.AdminPasswordHash, password) == nil {
+		h.session.SetSiteSession(w, sh.site.ID)
+		http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
 		return
 	}
-	http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
+	if h.globalAdminHash != "" {
+		// The site budget alone would give one IP 5 guesses per site at
+		// the global password; charge them to a single shared budget.
+		if !h.limiter.allow("global:" + ip) {
+			h.render(w, r, "admin/login.html", map[string]interface{}{
+				"Error": "Too many attempts. Try again later.",
+			})
+			return
+		}
+		if auth.CheckPassword(h.globalAdminHash, password) == nil {
+			h.session.SetGlobalSession(w)
+			http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
+			return
+		}
+	}
+	h.render(w, r, "admin/login.html", map[string]interface{}{
+		"Error": "Invalid password.",
+	})
 }
 
 func (h *Handler) AdminLogout(w http.ResponseWriter, r *http.Request) {

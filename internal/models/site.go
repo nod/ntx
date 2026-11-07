@@ -12,7 +12,7 @@ import (
 type dbSite struct {
 	ID       uint   `gorm:"primarykey;autoIncrement"`
 	Key      string `gorm:"uniqueIndex;not null"`
-	Hostname string `gorm:"uniqueIndex;not null"`
+	Hostname string `gorm:"not null"` // not unique: see migration 003
 }
 
 func (dbSite) TableName() string { return "sites" }

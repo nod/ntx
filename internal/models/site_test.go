@@ -193,3 +193,20 @@ func TestEnsureSitesSurvivesURLSwap(t *testing.T) {
 		t.Errorf("hostnames not reconciled after swap: %v", hostnames)
 	}
 }
+
+// TestSiteModelDoesNotReintroduceHostnameUnique: migration 003 dropped
+// UNIQUE(sites.hostname) because it broke key renames and site_url swaps
+// at boot. The GORM model must agree, or anyone running AutoMigrate (tests,
+// tooling) quietly puts the constraint back.
+func TestSiteModelDoesNotReintroduceHostnameUnique(t *testing.T) {
+	database := newTestSiteDB(t)
+	if err := database.AutoMigrate(&dbSite{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := database.Create(&dbSite{Key: "one", Hostname: "same.example.com"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Create(&dbSite{Key: "two", Hostname: "same.example.com"}).Error; err != nil {
+		t.Errorf("two site rows sharing a hostname must be allowed after AutoMigrate: %v", err)
+	}
+}

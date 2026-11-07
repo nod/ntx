@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,11 +17,22 @@ import (
 const (
 	cookieName    = "ntx_session"
 	sessionMaxAge = 24 * time.Hour
-
-	// GlobalSiteID marks a session issued against the global admin
-	// password: it authenticates against every site, not just one.
-	GlobalSiteID int64 = 0
 )
+
+// Session is what a valid session cookie grants. A global session -- issued
+// against the global admin password -- is valid on every site; any other
+// session is valid only on SiteID. Global is an explicit flag rather than a
+// reserved SiteID so that no id, least of all Go's zero value, can ever be
+// mistaken for "every site".
+type Session struct {
+	Global bool
+	SiteID int64 // meaningful only when !Global; always > 0
+}
+
+// Allows reports whether s authenticates a request for siteID.
+func (s Session) Allows(siteID int64) bool {
+	return s.Global || s.SiteID == siteID
+}
 
 var ErrInvalidSession = errors.New("invalid session")
 
@@ -42,13 +54,20 @@ func HashPassword(password string) (string, error) {
 	return string(b), err
 }
 
-// SetSession issues a session scoped to siteID (use GlobalSiteID for a
-// cross-site admin session).
-func (sm *SessionManager) SetSession(w http.ResponseWriter, siteID int64) {
-	issuedAt := time.Now().Unix()
-	payload := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%d:%d", issuedAt, siteID)))
-	sig := sm.sign(payload)
-	value := payload + "." + sig
+// SetSiteSession issues a session valid only on siteID.
+func (sm *SessionManager) SetSiteSession(w http.ResponseWriter, siteID int64) {
+	sm.setCookie(w, fmt.Sprintf("site:%d", siteID))
+}
+
+// SetGlobalSession issues a session valid on every site.
+func (sm *SessionManager) SetGlobalSession(w http.ResponseWriter) {
+	sm.setCookie(w, "global")
+}
+
+// setCookie signs "<issuedAt>:<scope>" and sets it as the session cookie.
+func (sm *SessionManager) setCookie(w http.ResponseWriter, scope string) {
+	payload := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%d:%s", time.Now().Unix(), scope)))
+	value := payload + "." + sm.sign(payload)
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
 		Value:    value,
@@ -73,34 +92,29 @@ func (sm *SessionManager) ClearSession(w http.ResponseWriter) {
 	})
 }
 
-// SessionSiteID returns the siteID carried by r's session cookie, and
-// whether a valid, unexpired session was present at all.
-func (sm *SessionManager) SessionSiteID(r *http.Request) (int64, bool) {
+// Session returns what r's session cookie grants, and whether a valid,
+// unexpired session was present at all.
+func (sm *SessionManager) Session(r *http.Request) (Session, bool) {
 	cookie, err := r.Cookie(cookieName)
 	if err != nil {
-		return 0, false
+		return Session{}, false
 	}
-	siteID, err := sm.verify(cookie.Value)
+	sess, err := sm.verify(cookie.Value)
 	if err != nil {
-		return 0, false
+		return Session{}, false
 	}
-	return siteID, true
-}
-
-// IsAuthenticated reports whether r carries any valid session, regardless
-// of which site it's scoped to.
-func (sm *SessionManager) IsAuthenticated(r *http.Request) bool {
-	_, ok := sm.SessionSiteID(r)
-	return ok
+	return sess, true
 }
 
 // Middleware redirects to /admin/login unless r carries a valid session
-// that is either global or scoped to currentSite(r).
-func (sm *SessionManager) Middleware(currentSite func(*http.Request) int64) func(http.Handler) http.Handler {
+// that allows the site currentSite resolves for r. If currentSite cannot
+// resolve a site it fails closed, even for a global session.
+func (sm *SessionManager) Middleware(currentSite func(*http.Request) (int64, bool)) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			siteID, ok := sm.SessionSiteID(r)
-			if !ok || (siteID != GlobalSiteID && siteID != currentSite(r)) {
+			siteID, resolved := currentSite(r)
+			sess, ok := sm.Session(r)
+			if !resolved || !ok || !sess.Allows(siteID) {
 				http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 				return
 			}
@@ -115,27 +129,44 @@ func (sm *SessionManager) sign(payload string) string {
 	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func (sm *SessionManager) verify(value string) (int64, error) {
+func (sm *SessionManager) verify(value string) (Session, error) {
 	parts := strings.SplitN(value, ".", 2)
 	if len(parts) != 2 {
-		return 0, ErrInvalidSession
+		return Session{}, ErrInvalidSession
 	}
 	expected := sm.sign(parts[0])
 	if !hmac.Equal([]byte(expected), []byte(parts[1])) {
-		return 0, ErrInvalidSession
+		return Session{}, ErrInvalidSession
 	}
 
 	decoded, err := base64.StdEncoding.DecodeString(parts[0])
 	if err != nil {
-		return 0, ErrInvalidSession
-	}
-	var issuedAt, siteID int64
-	if _, err := fmt.Sscanf(string(decoded), "%d:%d", &issuedAt, &siteID); err != nil {
-		return 0, ErrInvalidSession
-	}
-	if time.Since(time.Unix(issuedAt, 0)) > sessionMaxAge {
-		return 0, ErrInvalidSession
+		return Session{}, ErrInvalidSession
 	}
 
-	return siteID, nil
+	// "<issuedAt>:global" or "<issuedAt>:site:<id>"; anything else --
+	// including the pre-flag "<issuedAt>:<id>" format -- is rejected.
+	fields := strings.Split(string(decoded), ":")
+	issuedAt, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil {
+		return Session{}, ErrInvalidSession
+	}
+	var sess Session
+	switch {
+	case len(fields) == 2 && fields[1] == "global":
+		sess.Global = true
+	case len(fields) == 3 && fields[1] == "site":
+		id, err := strconv.ParseInt(fields[2], 10, 64)
+		if err != nil || id <= 0 {
+			return Session{}, ErrInvalidSession
+		}
+		sess.SiteID = id
+	default:
+		return Session{}, ErrInvalidSession
+	}
+
+	if time.Since(time.Unix(issuedAt, 0)) > sessionMaxAge {
+		return Session{}, ErrInvalidSession
+	}
+	return sess, nil
 }

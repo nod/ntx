@@ -10,9 +10,10 @@ import (
 )
 
 // Generate renders every configured site's static output into its own
-// <outDir>/<site.key>/ subdirectory.
+// <outDir>/<site.key>/ subdirectory, in config order, stopping at the
+// first site that fails.
 func (h *Handler) Generate(outDir string) error {
-	for _, sh := range h.sites {
+	for _, sh := range h.ordered {
 		siteOut := filepath.Join(outDir, sh.site.Key)
 		if err := h.generateSite(sh, siteOut); err != nil {
 			return fmt.Errorf("generating site %q: %w", sh.site.Key, err)

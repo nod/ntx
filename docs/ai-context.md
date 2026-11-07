@@ -95,7 +95,11 @@ type SectionPage struct {
 
 Validation in `Load()` rejects: a missing or under-32-char `session_secret`; zero
 `[[site]]` blocks; a site with no `key` or no `site_url`; a duplicate `key` or
-`site_url` across sites; and any `admin_password_hash` (or a non-empty
+`site_url` (case-insensitive) across sites; a `key` that is not
+`[a-z0-9][a-z0-9_-]*` (it names a `generate` output dir); a `site_url` with a
+scheme, port, path or whitespace (routing matches the bare Host); a section
+slug that is not one path segment or is reserved (`blog`, `static`, `admin`,
+`about` — see `config.CheckSectionSlug`, which `server.New` also calls); and any `admin_password_hash` (or a non-empty
 `global_admin_password_hash`) that is missing or not a well-formed bcrypt hash.
 `Load()` also fills per-site defaults, including resolving an unset per-site
 `template_path`/`static_path` to the global value — so handlers never need to
@@ -104,8 +108,9 @@ consult the global paths.
 `Site.ID` is deliberately not read from TOML. `models.EnsureSites` writes it
 after upserting the `sites` table, and it is the FK every post, tag and session
 is scoped by. Persisted ids start at 1, so `ID == 0` means EnsureSites never
-ran; both `handlers.New` and `server.New` reject that, because 0 is also
-`auth.GlobalSiteID` and would collapse the tenant boundary.
+ran; `handlers.New` (which both `serve` and `generate` go through) rejects
+that, because its per-site map is keyed by ID and every site would collapse
+into one entry.
 
 ## Template system (`internal/handlers/handler.go`)
 
@@ -206,7 +211,11 @@ configure it. Slugs no site configures are never routed — they 404 at the chi
 level automatically.
 
 The auth-gated group uses `session.Middleware`, which accepts a session only if
-it is scoped to the resolved site or carries `auth.GlobalSiteID`.
+`auth.Session.Allows` the resolved site: the session is either global (an
+explicit flag, issued by `SetGlobalSession` for the global admin password) or
+a site session for exactly that site ID (`SetSiteSession`). The cookie payload
+is `<issuedAt>:global` or `<issuedAt>:site:<id>` with `id > 0`; no site ID
+doubles as "global", and an unresolved site fails closed.
 
 ## Template data by route
 

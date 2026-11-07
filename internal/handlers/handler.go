@@ -115,21 +115,19 @@ type Handler struct {
 	session         *auth.SessionManager
 	limiter         *loginLimiter
 	sites           map[int64]*siteHandler
+	ordered         []*siteHandler // same handlers as sites, in config order
 	globalAdminHash string
 }
 
 // New builds a Handler serving every site in sites, backed by posts
 // (an unscoped store — New calls posts.ForSite per site internally).
 func New(sites []config.Site, posts *models.PostStore, session *auth.SessionManager, dev bool, globalAdminHash string) (*Handler, error) {
-	// Ruling 10, enforced here because this is where the damage happens:
-	// h.sites is keyed by site.ID, so if EnsureSites never ran, every site
-	// has ID 0 and they all collapse into one map entry, last write wins.
-	// 0 is also auth.GlobalSiteID, so every site-scoped session would
-	// authenticate everywhere. Persisted ids start at 1, so ID == 0 always
-	// means "EnsureSites was not called", never a real tenant. server.New
-	// checks this too -- it gives a better error earlier -- but `generate`
-	// calls handlers.New directly, so the guard belongs on this side of the
-	// boundary rather than resting on call-site discipline.
+	// Ruling 10: h.sites is keyed by site.ID, so if EnsureSites never ran,
+	// every site has ID 0 and they all collapse into one map entry, last
+	// write wins -- every host would serve one site's posts. Persisted ids
+	// start at 1, so ID == 0 always means "EnsureSites was not called",
+	// never a real tenant. Both `serve` (via server.New) and `generate`
+	// come through here, so this is the one place the guard lives.
 	for i := range sites {
 		if sites[i].ID == 0 {
 			return nil, fmt.Errorf("site %q has no database id: models.EnsureSites must run before handlers.New", sites[i].Key)
@@ -147,11 +145,13 @@ func New(sites []config.Site, posts *models.PostStore, session *auth.SessionMana
 		if err != nil {
 			return nil, fmt.Errorf("loading templates for site %q: %w", site.Key, err)
 		}
-		h.sites[site.ID] = &siteHandler{
+		sh := &siteHandler{
 			site:      site,
 			posts:     posts.ForSite(site.ID),
 			templates: tc,
 		}
+		h.sites[site.ID] = sh
+		h.ordered = append(h.ordered, sh)
 	}
 	return h, nil
 }

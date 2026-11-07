@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -114,14 +116,28 @@ func Load(cfgFile string) (*Config, error) {
 		if err := checkBcryptHash(s.AdminPasswordHash); err != nil {
 			return nil, fmt.Errorf("site %q: admin_password_hash: %w", s.Key, err)
 		}
+		if err := checkSiteKey(s.Key); err != nil {
+			return nil, fmt.Errorf("site %d: %w", i, err)
+		}
+		if err := checkSiteURL(s.SiteURL); err != nil {
+			return nil, fmt.Errorf("site %q: %w", s.Key, err)
+		}
+		for _, sec := range s.Sections {
+			if err := CheckSectionSlug(sec.Slug); err != nil {
+				return nil, fmt.Errorf("site %q: %w", s.Key, err)
+			}
+		}
 		if keys[s.Key] {
 			return nil, fmt.Errorf("duplicate site key %q", s.Key)
 		}
 		keys[s.Key] = true
-		if urls[s.SiteURL] {
-			return nil, fmt.Errorf("duplicate site_url %q", s.SiteURL)
+		// Routing lowercases the Host header, so site_urls that differ only
+		// in case are the same routing key.
+		host := strings.ToLower(s.SiteURL)
+		if urls[host] {
+			return nil, fmt.Errorf("duplicate site_url %q (site_url matching ignores case)", s.SiteURL)
 		}
-		urls[s.SiteURL] = true
+		urls[host] = true
 
 		if s.SiteName == "" {
 			s.SiteName = "ntx"
@@ -148,6 +164,59 @@ func Load(cfgFile string) (*Config, error) {
 func checkBcryptHash(hash string) error {
 	if _, err := bcrypt.Cost([]byte(hash)); err != nil {
 		return fmt.Errorf("not a valid bcrypt hash (run: ntx hash-password): %w", err)
+	}
+	return nil
+}
+
+// siteKeyRe: a key names the site's `ntx generate` output directory, so it
+// must be one lowercase path segment -- no traversal, no separators, and no
+// two keys that collide on a case-insensitive filesystem.
+var siteKeyRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
+func checkSiteKey(key string) error {
+	if !siteKeyRe.MatchString(key) {
+		return fmt.Errorf("key %q must be lowercase letters, digits, '-' or '_', starting with a letter or digit", key)
+	}
+	return nil
+}
+
+// checkSiteURL requires a bare hostname. Routing compares site_url against
+// the request's Host header with any port stripped, so a scheme, port or
+// path in site_url would make the site unreachable: it boots fine and 404s
+// on every request.
+func checkSiteURL(u string) error {
+	switch {
+	case strings.Contains(u, "://"):
+		return fmt.Errorf("site_url %q must be a bare hostname, without a scheme (e.g. \"example.com\")", u)
+	case strings.ContainsAny(u, "/ \t\r\n"):
+		return fmt.Errorf("site_url %q must be a bare hostname, without a path or whitespace", u)
+	}
+	if _, _, err := net.SplitHostPort(u); err == nil {
+		return fmt.Errorf("site_url %q must be a bare hostname, without a port: the port is ignored when matching the Host header", u)
+	}
+	return nil
+}
+
+// reservedSectionSlugs are path prefixes the server routes itself. Every
+// site's section slugs are registered on one shared router, so a section
+// named after one of these would take over that route on every site.
+var reservedSectionSlugs = map[string]bool{
+	"blog":   true,
+	"static": true,
+	"admin":  true,
+	"about":  true,
+}
+
+var sectionSlugRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// CheckSectionSlug rejects a section slug that is not a single plain path
+// segment, or that collides with a built-in route.
+func CheckSectionSlug(slug string) error {
+	if !sectionSlugRe.MatchString(slug) {
+		return fmt.Errorf("section slug %q must be a single path segment of letters, digits, '.', '-' or '_'", slug)
+	}
+	if reservedSectionSlugs[slug] {
+		return fmt.Errorf("section slug %q is reserved for a built-in route", slug)
 	}
 	return nil
 }

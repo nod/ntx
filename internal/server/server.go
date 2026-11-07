@@ -17,19 +17,8 @@ import (
 )
 
 func New(cfg *config.Config, posts *models.PostStore, session *auth.SessionManager) (*http.Server, error) {
-	// Ruling 10: a site whose ID is still the zero value never went
-	// through models.EnsureSites. 0 == auth.GlobalSiteID, so leaving this
-	// unchecked would mean every site-scoped session silently
-	// authenticates on every site -- a total, silent collapse of the
-	// tenant boundary. Real persisted ids start at 1, so ID == 0 here
-	// always means "EnsureSites was not called", never a legitimate
-	// tenant.
-	for i := range cfg.Sites {
-		if cfg.Sites[i].ID == 0 {
-			return nil, fmt.Errorf("site %q has no database id: models.EnsureSites must run before server.New", cfg.Sites[i].Key)
-		}
-	}
-
+	// handlers.New rejects sites that never went through
+	// models.EnsureSites (ID still 0), so nothing below sees an unset id.
 	h, err := handlers.New(cfg.Sites, posts, session, cfg.Dev, cfg.GlobalAdminPasswordHash)
 	if err != nil {
 		return nil, err
@@ -57,9 +46,15 @@ func New(cfg *config.Config, posts *models.PostStore, session *auth.SessionManag
 	// chi routes can't vary by Host, so we register one route per unique
 	// section slug across all sites; which site's Section content applies
 	// is decided per-request inside handlers.SectionPage via sitectx.
+	// Because the router is shared, a slug that collides with a built-in
+	// route would hijack it on every site -- refuse it here as well as in
+	// config.Load, since callers can hand New a Config directly.
 	sectionSlugs := map[string]bool{}
 	for _, site := range cfg.Sites {
 		for _, sec := range site.Sections {
+			if err := config.CheckSectionSlug(sec.Slug); err != nil {
+				return nil, fmt.Errorf("site %q: %w", site.Key, err)
+			}
 			sectionSlugs[sec.Slug] = true
 		}
 	}
@@ -94,16 +89,14 @@ func New(cfg *config.Config, posts *models.PostStore, session *auth.SessionManag
 	r.Post("/admin/login", h.AdminLoginPost)
 
 	r.Group(func(r chi.Router) {
-		r.Use(session.Middleware(func(r *http.Request) int64 {
+		r.Use(session.Middleware(func(r *http.Request) (int64, bool) {
+			// resolveSite 404s unmatched hosts before this runs; if it ever
+			// didn't, Middleware fails closed on the false.
 			site := sitectx.From(r)
 			if site == nil {
-				// resolveSite always runs first and 404s on no match, so
-				// this is unreachable in practice -- but return a value
-				// that can never equal a real site id or auth.GlobalSiteID
-				// (0) rather than assume that invariant silently.
-				return -1
+				return 0, false
 			}
-			return site.ID
+			return site.ID, true
 		}))
 		r.Post("/admin/logout", h.AdminLogout)
 		r.Get("/admin/posts", h.AdminPosts)
