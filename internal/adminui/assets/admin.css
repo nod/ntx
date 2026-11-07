@@ -31,3 +31,7 @@ form.inline { display: inline; }
 .badge.ok { color: var(--ok); border-color: var(--ok); }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: .5rem; border-bottom: 1px solid var(--line); }
+.notice { border: 1px solid var(--ok); border-radius: 6px; padding: .75rem 1rem; margin: 1rem 0; }
+.notice p { margin: 0 0 .5rem; }
+input.copy { width: 100%; font-family: ui-monospace, monospace; }
+h2 { margin-top: 2rem; }

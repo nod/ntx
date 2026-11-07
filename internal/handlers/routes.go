@@ -40,6 +40,13 @@ func (h *Handler) Mount(r chi.Router) {
 
 	r.Group(func(r chi.Router) {
 		r.Use(h.RequireSiteAdmin)
+		r.Get("/admin/members", h.Members)
+		r.Post("/admin/members", h.MembersAdd)
+		r.Post("/admin/members/invite", h.MembersInvite)
+		r.Post("/admin/members/{userID}", h.MemberUpdate)
+		r.Post("/admin/members/{userID}/remove", h.MemberRemove)
+		r.Post("/admin/invites/{id}/cancel", h.InviteCancel)
+		r.Post("/admin/invites/{id}/regenerate", h.InviteRegenerate)
 		r.Get("/admin/settings", h.Settings)
 		r.Post("/admin/settings", h.SettingsPost)
 	})

@@ -1,0 +1,81 @@
+{{define "title"}}members{{end}}
+{{define "content"}}
+<section>
+  <h1>members</h1>
+  {{with .InviteLink}}
+  <div class="notice">
+    <p>Copy this invite link and send it yourself. It won't be shown again.</p>
+    <input type="text" readonly value="{{.}}" aria-label="invite link" class="copy">
+  </div>
+  {{end}}
+  <table>
+    <thead><tr><th>email</th><th>name</th><th>role</th><th>can publish</th><th></th></tr></thead>
+    <tbody>
+    {{range .Members}}
+      <tr>
+        <td>{{.User.Email}}{{if .User.IsPlatformAdmin}} <span class="badge">platform admin</span>{{end}}</td>
+        <td>{{.User.Name}}</td>
+        {{if .Manageable}}
+        <td colspan="2">
+          <form method="POST" action="/admin/members/{{.User.ID}}" class="inline">
+            <select name="role" aria-label="role">
+              <option value="contributor"{{if eq .Membership.Role "contributor"}} selected{{end}}>contributor</option>
+              <option value="admin"{{if eq .Membership.Role "admin"}} selected{{end}}>admin</option>
+            </select>
+            <label><input type="checkbox" name="can_publish"{{if .Membership.CanPublish}} checked{{end}}> can publish</label>
+            <button type="submit">save</button>
+          </form>
+        </td>
+        <td>
+          <form method="POST" action="/admin/members/{{.User.ID}}/remove" class="inline">
+            <button type="submit" class="danger" data-confirm="Remove {{.User.Email}} from this site?">remove</button>
+          </form>
+        </td>
+        {{else}}
+        <td>{{.Membership.Role}}</td><td>{{if .Membership.CanPublish}}yes{{end}}</td><td></td>
+        {{end}}
+      </tr>
+    {{else}}
+      <tr><td colspan="5" class="muted">no members yet</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+
+  <h2>pending invites</h2>
+  <table>
+    <thead><tr><th>email</th><th>role</th><th>expires</th><th></th></tr></thead>
+    <tbody>
+    {{range .Invites}}
+      <tr>
+        <td>{{.Email}}</td>
+        <td>{{.Role}}{{if and .CanPublish (eq .Role "contributor")}} (can publish){{end}}</td>
+        <td>{{.ExpiresAt.Format "2006-01-02"}}</td>
+        <td>
+          <form method="POST" action="/admin/invites/{{.ID}}/regenerate" class="inline"><button type="submit">new link</button></form>
+          <form method="POST" action="/admin/invites/{{.ID}}/cancel" class="inline"><button type="submit" class="danger">cancel</button></form>
+        </td>
+      </tr>
+    {{else}}
+      <tr><td colspan="4" class="muted">no pending invites</td></tr>
+    {{end}}
+    </tbody>
+  </table>
+
+  <h2>add or invite someone</h2>
+  <p class="hint"><strong>Add</strong> gives them access now; they sign in with the site's provider using this email. <strong>Invite</strong> makes a link for you to send.</p>
+  <form method="POST" action="/admin/members" class="stack">
+    <label for="email">email</label>
+    <input type="email" id="email" name="email" required>
+    <label for="role">role</label>
+    <select id="role" name="role">
+      <option value="contributor">contributor</option>
+      <option value="admin">admin</option>
+    </select>
+    <label><input type="checkbox" name="can_publish"> can publish (contributors)</label>
+    <div class="actions">
+      <button type="submit" class="primary">add</button>
+      <button type="submit" formaction="/admin/members/invite">invite</button>
+    </div>
+  </form>
+</section>
+{{end}}
