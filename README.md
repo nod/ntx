@@ -20,8 +20,12 @@ Can also be used to generate a static site for deployment anywhere.
 
 ```sh
 brew tap nod/ntx https://github.com/nod/ntx
+brew trust --formula nod/ntx/ntx   # current Homebrew requires trusting third-party taps
 brew install ntx
 ```
+
+Upgrade with `brew update && brew upgrade ntx`. If you tapped before v0.7.2 and
+`brew install` can't find `ntx`, run `brew update` first to refresh the tap.
 
 **Shell script:**
 

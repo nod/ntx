@@ -46,7 +46,7 @@ checksums.txt
 and `main` should have a new commit, "Update Homebrew formula to v1.2.3". Then:
 
 ```sh
-brew update && brew upgrade ntx      # or: brew tap nod/ntx https://github.com/nod/ntx && brew install ntx
+brew update && brew upgrade ntx      # first install: see the README (tap, brew trust, install)
 ntx version                          # prints: 1.2.3
 ```
 
