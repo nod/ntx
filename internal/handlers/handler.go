@@ -13,6 +13,7 @@ import (
 
 	"github.com/nod/ntx/internal/adminui"
 	"github.com/nod/ntx/internal/auth"
+	"github.com/nod/ntx/internal/authz"
 	"github.com/nod/ntx/internal/models"
 	"github.com/nod/ntx/internal/sitectx"
 	"github.com/nod/ntx/internal/sitereg"
@@ -230,7 +231,7 @@ func (h *Handler) RequireSiteAdmin(next http.Handler) http.Handler {
 			h.notFound(w)
 		case a == nil:
 			http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
-		case !(a.IsPlatform() || (a.Membership != nil && a.Membership.Role == models.RoleAdmin)):
+		case !authz.SiteAdmin(a):
 			http.Error(w, "Forbidden", http.StatusForbidden)
 		default:
 			next.ServeHTTP(w, r)
