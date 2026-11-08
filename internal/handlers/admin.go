@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -259,17 +260,7 @@ func (h *Handler) UpdatePost(w http.ResponseWriter, r *http.Request) {
 				h.forbidden(w, r)
 				return
 			}
-			// Without the base the editor sent, there's no telling what the
-			// contributor saw: the zero time marks the revision stale.
-			base, err := time.Parse(time.RFC3339Nano, r.FormValue("base"))
-			if err != nil {
-				base = time.Time{}
-			}
-			if _, err := ps.SavePending(existing.ID, a.User.ID, updated.Title, updated.Body, updated.Tags, base); err != nil {
-				h.serverError(w, err)
-				return
-			}
-			http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
+			h.savePending(w, r, ps, existing.ID, updated)
 			return
 		}
 
@@ -288,7 +279,17 @@ func (h *Handler) UpdatePost(w http.ResponseWriter, r *http.Request) {
 			updated.Published = action == "publish"
 			err = ps.Update(updated)
 		default: // "save" changes content only, never the published state
-			err = ps.UpdateContent(updated)
+			if authz.CanPublishOwn(a) {
+				err = ps.UpdateContent(updated)
+			} else {
+				// Someone who may only edit drafts: if the post was
+				// published since it was read, the edit waits for review.
+				err = ps.UpdateDraft(updated)
+				if errors.Is(err, models.ErrLiveOnce) {
+					h.savePending(w, r, ps, existing.ID, updated)
+					return
+				}
+			}
 			updated.Published = existing.Published
 		}
 		if err != nil {
@@ -298,6 +299,22 @@ func (h *Handler) UpdatePost(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
 	})
+}
+
+// savePending stores the form's edit as postID's pending changes and
+// returns to the posts list.
+func (h *Handler) savePending(w http.ResponseWriter, r *http.Request, ps *models.PostStore, postID int64, edit *models.Post) {
+	// Without the base the editor sent, there's no telling what the
+	// contributor saw: the zero time marks the revision stale.
+	base, err := time.Parse(time.RFC3339Nano, r.FormValue("base"))
+	if err != nil {
+		base = time.Time{}
+	}
+	if _, err := ps.SavePending(postID, auth.ActorFrom(r).User.ID, edit.Title, edit.Body, edit.Tags, base); err != nil {
+		h.serverError(w, err)
+		return
+	}
+	http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
 }
 
 // postFromParam loads the {id} post from site, writing a 404 or 500 and

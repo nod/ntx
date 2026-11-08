@@ -300,3 +300,31 @@ func TestUpdateContentKeepsPublishedState(t *testing.T) {
 		t.Fatalf("after UpdateContent: published=%v title=%q", got.Published, got.Title)
 	}
 }
+
+// UpdateDraft is the save for someone who may only edit drafts: once the
+// post has been published (say, by an admin a moment earlier) it must
+// change nothing.
+func TestUpdateDraftRefusesLiveOnce(t *testing.T) {
+	f := newPeople(t)
+	u := f.person(t, "w@x.io")
+	ps := NewPostStore(f.db).ForSite(f.a.ID)
+	d := &Post{Slug: "d", Title: "D", Body: "b", AuthorID: &u.ID}
+	if err := ps.Create(d); err != nil {
+		t.Fatal(err)
+	}
+	d.Title = "Draft edit"
+	if err := ps.UpdateDraft(d); err != nil {
+		t.Fatalf("UpdateDraft on a draft: %v", err)
+	}
+	if got := mustGet(t, ps, d.ID); got.Title != "Draft edit" {
+		t.Fatalf("draft not updated: %+v", got)
+	}
+	live := livePost(t, ps, u, "live", true)
+	live.Title = "Unreviewed"
+	if err := ps.UpdateDraft(live); !errors.Is(err, ErrLiveOnce) {
+		t.Fatalf("UpdateDraft on a live-once post = %v, want ErrLiveOnce", err)
+	}
+	if got := mustGet(t, ps, live.ID); got.Title != "Title live" {
+		t.Fatalf("live post changed: %+v", got)
+	}
+}

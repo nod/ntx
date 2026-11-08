@@ -221,10 +221,20 @@ func (s *PostStore) Update(p *Post) error {
 	})
 }
 
+// ErrLiveOnce: UpdateDraft found the post already published once.
+var ErrLiveOnce = errors.New("post has been published")
+
 // UpdateContent saves a post's slug, title, body and tags, leaving its
 // published state alone: a plain save must never publish or unpublish,
 // whatever the caller read earlier.
-func (s *PostStore) UpdateContent(p *Post) error {
+func (s *PostStore) UpdateContent(p *Post) error { return s.updateContent(p, false) }
+
+// UpdateDraft is UpdateContent for someone who may only edit
+// never-published drafts. The check is part of the write, so a post
+// published a moment earlier is left alone (ErrLiveOnce).
+func (s *PostStore) UpdateDraft(p *Post) error { return s.updateContent(p, true) }
+
+func (s *PostStore) updateContent(p *Post, draftOnly bool) error {
 	if !slugRe.MatchString(p.Slug) {
 		return fmt.Errorf("invalid slug %q: must match %s", p.Slug, slugRe)
 	}
@@ -234,13 +244,20 @@ func (s *PostStore) UpdateContent(p *Post) error {
 	}
 	r := dbPost{ID: uint(p.ID)}
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		res := tx.Model(&r).Where("site_id = ?", s.siteID).Updates(map[string]any{
-			"slug": p.Slug, "title": p.Title, "body": p.Body,
-		})
+		q := tx.Model(&r).Where("site_id = ?", s.siteID)
+		if draftOnly {
+			q = q.Where("first_published_at IS NULL")
+		}
+		res := q.Updates(map[string]any{"slug": p.Slug, "title": p.Title, "body": p.Body})
 		if res.Error != nil {
 			return res.Error
 		}
 		if res.RowsAffected == 0 {
+			if draftOnly {
+				if _, err := s.postInSite(tx, p.ID); err == nil {
+					return ErrLiveOnce
+				}
+			}
 			return fmt.Errorf("post %d not found in site %d", p.ID, s.siteID)
 		}
 		return tx.Model(&r).Association("Tags").Replace(tags)
