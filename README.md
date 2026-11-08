@@ -9,6 +9,10 @@ supply.
 One process can serve several websites, routed by Host header, each with its
 own content, sections and theme.
 
+Each site has its own people. A site signs them in with Google or Auth0, and
+access is by invitation only: site admins add people or send invite links, and
+contributors can be trusted to publish or have their work wait for an admin.
+
 Dynamic option works with sqlite or postgresql to suit your needs.
 
 Can also be used to generate a static site for deployment anywhere.

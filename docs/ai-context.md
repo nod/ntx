@@ -8,7 +8,7 @@ A self-hosted site server written in Go: one binary that serves blogs, content s
 
 **ntx is multi-tenant, and sites are managed in the browser.** `ntx.toml` holds only server settings. Sites, their sections, posts, tags and sessions live in the database. A request is matched to a site by its `Host` header (lowercased, port stripped) against each site's `hostname`, or to the configured `platform_hostname`, where root signs in before any site exists. Any code touching content must stay inside the resolved site's scope; that is the invariant this codebase exists to protect.
 
-The design for roles and SSO is `docs/superpowers/specs/2026-11-07-roles-and-sso-design.md`. Phase 1 is built: sites in the database, root, the platform views, and themes. Phases 2 (people and Google/Auth0 SSO) and 3 (pending revisions) aren't built yet. Their tables already exist in the schema.
+The design for roles and SSO is `docs/superpowers/specs/2026-11-07-roles-and-sso-design.md`. Phases 1 (sites in the database, root, platform views, themes) and 2 (people, memberships, invites, Google/Auth0 SSO, platform admins) are built. Phase 3 (pending revisions for contributors without `can_publish`) isn't: until then such a contributor can't edit a post once it has been published. `post_revisions` already exists in the schema.
 
 ## Module and Go version
 
@@ -27,9 +27,16 @@ internal/
   db/db.go                     # SQLite/Postgres open, goose migrations, legacy-schema refusal
   db/migrations/{sqlite,postgres}/100_initial.sql   # the whole schema
   models/site.go               # SiteStore: sites + sections CRUD with validation; ValidationError
-  models/user.go               # UserStore: EnsureRoot, GetByID
+  models/user.go               # UserStore: root bootstrap, people by email, edits (root-guarded)
+  models/membership.go         # MembershipStore: role + can_publish per (user, site)
+  models/identity.go           # IdentityStore: provider logins, reassigned-account guard
+  models/invite.go             # InviteStore: hashed tokens, transactional Accept
   models/session.go            # SessionStore: DB-backed sessions (token hash, host-bound)
-  models/post.go               # PostStore: site-scoped posts and tags (ForSite)
+  models/post.go               # PostStore: site-scoped posts and tags (ForSite), authors
+  secretbox/secretbox.go       # AES-256-GCM for provider client secrets
+  sso/                         # OIDC client (go-oidc), signed ntx_oauth flow state; ssotest = fake provider
+  people/people.go             # sign-in policy (invite → identity → email match → membership), AddMember
+  authz/authz.go               # the role table: every permission check
   clientip/clientip.go         # real client IP / scheme, believing X-Forwarded-* only from trusted_proxies
   auth/auth.go                 # Manager (Login/Logout/Middleware), Actor, RootDigest, bcrypt helpers
   auth/limiter.go              # failure-only sign-in limiter, per client IP
@@ -40,6 +47,9 @@ internal/
   handlers/handler.go          # Deps, Handler, TemplateCache (per theme), serve, render, Require*
   handlers/routes.go           # Mount: the route table
   handlers/{home,blog,section,admin,settings,platform,generate}.go
+  handlers/signin.go           # /auth/start, /auth/callback, /invite/{token}
+  handlers/members.go          # /admin/members, /admin/invites
+  handlers/users.go            # /admin/platform/users
   server/server.go             # middleware stack and host resolution around Mount
 themes/{default,blog,nerdtx}/  # shipped themes: templates/ and static/
 docs/                          # documentation
@@ -57,7 +67,7 @@ type Config struct {
     Dev              bool           // re-parse templates per request; cookies without Secure
     TrustedProxies   []netip.Prefix // trusted_proxies (CIDRs); default none
     SessionSecret    string         // required, ≥32 chars
-    EncryptionKey    []byte         // encryption_key, base64 → exactly 32 bytes; for secrets (phase 2)
+    EncryptionKey    []byte         // encryption_key, base64 → exactly 32 bytes; seals provider client secrets
     ThemesPath       string         // default ./themes
     PlatformHostname string         // required, bare host, lowercased
     RootPasswordHash string         // required, valid bcrypt
@@ -71,7 +81,10 @@ type Config struct {
 One goose migration per dialect, `100_initial.sql`. It holds every table the full design needs: `users`, `identities`, `sites`, `memberships`, `invites`, `sessions`, `posts`, `post_revisions`, `tags`, `post_tags`, `sections` and `section_pages`. `db.Open` returns `ErrLegacySchema` for a database that recorded any goose version below 100: there is no upgrade path. SQLite turns foreign keys on through the DSN (`_pragma=foreign_keys(1)`), and deletes cascade: deleting a site removes its posts, tags, sections and sessions.
 
 - **Sites** (`models.Site`): `Key` is immutable after creation and names the generate output folder. `Hostname` is lowercase, unique, and never equal to `platform_hostname`. Changing it deletes the site's sessions. `Theme` is a theme name. Sections and pages are stored in their own tables with `vars` as JSON objects; `SiteStore.SetSections` validates the whole set before writing, so a rejected set changes nothing.
-- **Users** (`models.User`): phase 1 has only root, created by `EnsureRoot`. Root's email is NULL, and a partial unique index allows one `is_root` row.
+- **Users** (`models.User`): root (created by `EnsureRoot`; NULL email; a partial unique index allows one `is_root` row) and people, keyed by lowercase email. Every store write that would give root an email, identity, membership or name, or change or delete it, returns `ErrRootProtected`. Emails go through `models.NormalizeEmail`.
+- **Memberships**: one per (user, site), role `admin` or `contributor`, plus `can_publish` (meaningful for contributors only).
+- **Identities**: (configured issuer, subject) → user. `Link` refuses a second subject from the same issuer for one user (`ErrIdentityConflict`, the reassigned-account guard).
+- **Invites**: sha256 of the token, 7-day expiry, one unused row per (site, email). `Accept` is one transaction: conditional `used_at` update, find-or-create the user, link the identity, add the membership.
 - **Sessions** (`models.Session`): the cookie holds a random token, and the DB stores its sha256. `SiteID` is the site the session was issued on, or nil for root on the platform host. Root sessions store `RootDigest(root_password_hash)`. `last_seen_at` is written at most once a minute.
 - **Posts** (`models.PostStore`): every query is scoped by `ForSite(siteID)`, with the site condition written as SQL; GORM drops zero-valued struct fields from a struct-based Where. `FirstPublishedAt` is set on the first publish and never cleared. `AllTags` returns only tags on published posts, because it feeds public pages; `Stats` counts every tag.
 
@@ -94,9 +107,11 @@ Then `(*handlers.Handler).Mount` registers the routes (`internal/handlers/routes
 | `GET /`, `/about`, `/blog`, `/blog/{slug}`, `/static/*` | public, from the site's theme |
 | `GET /{section}/{page}` | registered last; static segments win in chi |
 | `/admin/assets/*` | embedded CSS/JS |
-| `GET/POST /admin/login`, `POST /admin/logout` | root sign-in on any site host or the platform host |
-| `/admin/posts...`, `/admin/settings` | `RequireSiteAdmin`: needs a site, otherwise 404 (e.g. on the platform host) |
-| `/admin/platform/sites...` | `RequirePlatform`: root (or, later, platform admins) on any host |
+| `GET/POST /admin/login`, `POST /admin/logout` | root sign-in on any site host or the platform host; the provider button on sites that have one |
+| `/auth/start`, `/auth/callback`, `/invite/{token}` | SSO and invites; site hosts only |
+| `/admin/posts...` | `RequireMember`, then per-action `authz` checks |
+| `/admin/members...`, `/admin/invites/...`, `/admin/settings` | `RequireSiteAdmin`: needs a site, otherwise 404 (e.g. on the platform host) |
+| `/admin/platform/sites...`, `/admin/platform/users...` | `RequirePlatform`: root and platform admins, on any host they're signed in on |
 
 Each handler that needs a site goes through `h.serve(w, r, func(w, r, site *models.Site))`, the single place an unresolved site becomes a 404. Theme templates render through `h.render(w, site, name, data)`, which merges `SiteName`, `SiteURL` (the hostname) and `SiteDescription`. Admin pages render through `h.admin(w, r, page, data)`, which adds `Actor`, `Site` and `Error` and uses `adminui`.
 
@@ -112,8 +127,13 @@ After any write to sites or sections, call `Registry.Reload()`. ntx is single-in
   - the user still exists;
   - for root, its stored digest matches the current hash.
 
-  Phase 1 accepts only root sessions. Phase 2 adds members, who also need a current membership on the session's site.
-- **`Actor`.** `IsRoot()`, `IsPlatform()` and `CanAdminSite()` are all nil-safe.
+  - for everyone else, a non-nil site and a **current membership** on it (platform admins included), attached as `Actor.Membership`. User, flag and membership are re-read every request, so revocations are immediate.
+- **`Actor`.** `IsRoot()` and `IsPlatform()` are nil-safe. Every other permission is an `authz` function.
+- **SSO.** `/auth/start` (GET, or POST from an invite page) sets the signed `ntx_oauth` cookie (state, nonce, PKCE verifier, site ID, invite; 10 min, `SameSite=Lax`, `Path=/auth`) and redirects to the provider. `/auth/callback` checks the cookie's site and state, exchanges the code, verifies the ID token and `email_verified`, then `people.SignIn`, then `Auth.Login`, and ends on an interstitial page (meta refresh) because the session cookie is `SameSite=Strict`. The callback URL is `https://<hostname>/auth/callback` (dev: request scheme and port). Tests use `sso/ssotest` and `Deps.IssuerFor`.
+
+### Authorization
+
+`internal/authz` is the role table. Handlers call it (`SiteAdmin`, `SiteMember`, `CanSeePost`, `CanEditPost`, `CanPublishPost`, `CanDeletePost`, `CanManageMember`, `CanChangeUser`, …) and never compare roles themselves. Route groups: `RequireMember` (posts), `RequireSiteAdmin` (members, settings), `RequirePlatform` (platform views). A post a contributor can't see is a 404.
 
 ## Themes and templates
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -12,24 +13,32 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nod/ntx/internal/auth"
 	"github.com/nod/ntx/internal/config"
 	"github.com/nod/ntx/internal/db"
 	"github.com/nod/ntx/internal/handlers"
 	"github.com/nod/ntx/internal/models"
+	"github.com/nod/ntx/internal/people"
+	"github.com/nod/ntx/internal/secretbox"
 	"github.com/nod/ntx/internal/sitereg"
+	"github.com/nod/ntx/internal/sso"
+	"github.com/nod/ntx/internal/sso/ssotest"
 )
 
 const platformHost = "admin.example.com"
 
 type env struct {
-	t      *testing.T
-	ts     *httptest.Server
-	themes string
-	posts  *models.PostStore
-	siteA  *models.Site
-	siteB  *models.Site
+	t       *testing.T
+	ts      *httptest.Server
+	themes  string
+	posts   *models.PostStore
+	people  *people.Service
+	invites *models.InviteStore
+	fake    *ssotest.Provider
+	siteA   *models.Site
+	siteB   *models.Site
 }
 
 func writeTheme(t *testing.T, root, name string) {
@@ -51,7 +60,12 @@ func writeTheme(t *testing.T, root, name string) {
 	}
 }
 
-func setup(t *testing.T) *env {
+func setup(t *testing.T) *env { t.Helper(); return setupMode(t, true) }
+
+// setupMode builds the full server stack; dev=false is production mode
+// (https callback URLs, Secure cookies). Both sites sign in through a fake
+// Auth0 tenant.
+func setupMode(t *testing.T, dev bool, opts ...func(*handlers.Deps)) *env {
 	t.Helper()
 	d, err := db.Open("sqlite://:memory:")
 	if err != nil {
@@ -74,31 +88,62 @@ func setup(t *testing.T) *env {
 			t.Fatal(err)
 		}
 	}
+	fake := ssotest.New(t)
+	encKey := []byte("0123456789abcdef0123456789abcdef")
+	sealed, err := secretbox.Seal(encKey, fake.ClientSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []*models.Site{a, b} {
+		if err := sites.SetProvider(s.ID, models.ProviderSettings{Type: models.ProviderAuth0, Domain: "tenant.example.com", ClientID: fake.ClientID}, sealed); err != nil {
+			t.Fatal(err)
+		}
+	}
 	reg, err := sitereg.New(sites)
 	if err != nil {
 		t.Fatal(err)
 	}
 	rootHash, _ := auth.HashPassword("rootpass")
 	cfg := &config.Config{
-		Dev:              true,
+		Dev:              dev,
 		TrustedProxies:   []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")},
 		ThemesPath:       themesRoot,
 		PlatformHostname: platformHost,
 		RootPasswordHash: rootHash,
 	}
-	am := auth.NewManager(models.NewSessionStore(d), users, rootHash, false)
+	mems, sessions := models.NewMembershipStore(d), models.NewSessionStore(d)
+	ids, invites := models.NewIdentityStore(d), models.NewInviteStore(d)
+	am := auth.NewManager(sessions, users, mems, rootHash, !dev)
 	posts := models.NewPostStore(d)
-	h := handlers.New(handlers.Deps{
+	deps := handlers.Deps{
 		Sites: sites, Posts: posts, Users: users, Registry: reg, Auth: am,
-		Limiter: auth.NewLimiter(), ThemesPath: themesRoot, PlatformHostname: platformHost,
-		RootPasswordHash: rootHash, Dev: true,
-	})
-	ts := httptest.NewServer(New(cfg, h, reg, am).Handler)
+		Memberships: mems, Identities: ids, Invites: invites, Sessions: sessions,
+		People: people.New(users, ids, mems, invites), SSO: sso.NewClient(nil),
+		SessionSecret: []byte("session-secret-session-secret-xx"), EncryptionKey: encKey,
+		IssuerFor: func(string, string) string { return fake.URL },
+		Limiter:   auth.NewLimiter(), ThemesPath: themesRoot, PlatformHostname: platformHost,
+		RootPasswordHash: rootHash, Dev: dev,
+	}
+	for _, o := range opts {
+		o(&deps)
+	}
+	h := handlers.New(deps)
+	// Run under the production server's own timeouts.
+	srv := New(cfg, h, reg, am)
+	ts := httptest.NewUnstartedServer(srv.Handler)
+	ts.Config.ReadTimeout, ts.Config.WriteTimeout, ts.Config.IdleTimeout = srv.ReadTimeout, srv.WriteTimeout, srv.IdleTimeout
+	ts.Start()
 	t.Cleanup(ts.Close)
-	return &env{t: t, ts: ts, themes: themesRoot, posts: posts, siteA: a, siteB: b}
+	return &env{
+		t: t, ts: ts, themes: themesRoot, posts: posts, siteA: a, siteB: b, fake: fake,
+		people: people.New(users, ids, mems, invites), invites: invites,
+	}
 }
 
-var noRedirect = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+var noRedirect = &http.Client{
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	Timeout:       20 * time.Second, // a hung handler fails the test instead of hanging it
+}
 
 // do sends a request with an explicit Host header, the way a browser
 // addressing that site would, and returns the status and body.
@@ -331,5 +376,161 @@ func TestRequestLogShowsClientIP(t *testing.T) {
 	}
 	if !strings.Contains(out, "a.example.com") || !strings.Contains(out, " 200 ") {
 		t.Errorf("request log must show host and status, got: %s", out)
+	}
+}
+
+func TestRequestLogRedactsTokens(t *testing.T) {
+	e := setup(t)
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	e.do(http.MethodGet, "a.example.com", "/invite/SECRET123", nil, nil, nil)
+	e.do(http.MethodGet, "a.example.com", "/auth/callback?code=CODE9&state=S", nil, nil, nil)
+	out := buf.String()
+	for _, secret := range []string{"SECRET123", "CODE9"} {
+		if strings.Contains(out, secret) {
+			t.Errorf("request log leaks %q: %s", secret, out)
+		}
+	}
+	if !strings.Contains(out, "/invite/[redacted]") || !strings.Contains(out, "/auth/callback ") {
+		t.Errorf("request log should still show the redacted paths: %s", out)
+	}
+}
+
+func cookieOf(resp *http.Response, name string) *http.Cookie {
+	for _, c := range resp.Cookies() {
+		if c.Name == name {
+			return c
+		}
+	}
+	return nil
+}
+
+// ssoLogin runs a provider sign-in through the whole server on host, with
+// headers on every request to ntx, and returns the callback response.
+func (e *env) ssoLogin(host, email string, headers map[string]string) *http.Response {
+	e.t.Helper()
+	e.fake.SetNext(ssotest.Identity{Subject: "sub-" + email, Email: email, EmailVerified: true})
+	resp, _ := e.do(http.MethodGet, host, "/auth/start", nil, headers, nil)
+	if resp.StatusCode != http.StatusFound {
+		e.t.Fatalf("/auth/start: %d", resp.StatusCode)
+	}
+	flow := cookieOf(resp, "ntx_oauth")
+	back, err := url.Parse(e.fake.Authorize(e.t, resp.Header.Get("Location")))
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	resp, body := e.do(http.MethodGet, host, back.RequestURI(), nil, headers, flow)
+	if resp.StatusCode != http.StatusOK {
+		e.t.Fatalf("callback: %d %s", resp.StatusCode, body)
+	}
+	return resp
+}
+
+func TestMemberSessionNotValidOnOtherSite(t *testing.T) {
+	e := setup(t)
+	if _, err := e.people.AddMember(e.siteA.ID, "m@x.io", models.RoleAdmin, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.people.AddMember(e.siteB.ID, "m@x.io", models.RoleAdmin, false); err != nil {
+		t.Fatal(err)
+	}
+	sess := cookieOf(e.ssoLogin("a.example.com", "m@x.io", nil), "ntx_session")
+	if resp, _ := e.do(http.MethodGet, "a.example.com", "/admin/posts", nil, nil, sess); resp.StatusCode != http.StatusOK {
+		t.Fatalf("on its own site: %d", resp.StatusCode)
+	}
+	resp, _ := e.do(http.MethodGet, "b.example.com", "/admin/posts", nil, nil, sess)
+	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != "/admin/login" {
+		t.Fatalf("site A session on site B: %d %s", resp.StatusCode, resp.Header.Get("Location"))
+	}
+}
+
+func TestInviteTokenOnlyOnItsSite(t *testing.T) {
+	e := setup(t)
+	_, token, err := e.invites.Create(e.siteA.ID, "i@x.io", models.RoleContributor, false, 0, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp, _ := e.do(http.MethodGet, "a.example.com", "/invite/"+token, nil, nil, nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("on its own site: %d", resp.StatusCode)
+	}
+	if resp, _ := e.do(http.MethodGet, "b.example.com", "/invite/"+token, nil, nil, nil); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("site A's invite on site B: %d", resp.StatusCode)
+	}
+}
+
+func TestSSOCallbackPassesCrossOriginProtection(t *testing.T) {
+	e := setup(t)
+	if _, err := e.people.AddMember(e.siteA.ID, "m@x.io", models.RoleAdmin, false); err != nil {
+		t.Fatal(err)
+	}
+	// The provider's redirect back is a cross-site top-level GET.
+	if c := cookieOf(e.ssoLogin("a.example.com", "m@x.io", map[string]string{"Sec-Fetch-Site": "cross-site"}), "ntx_session"); c == nil {
+		t.Fatal("cross-site callback set no session")
+	}
+	_, token, err := e.invites.Create(e.siteA.ID, "i@x.io", models.RoleContributor, false, 0, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"invite": {token}}
+	if resp, _ := e.do(http.MethodPost, "a.example.com", "/auth/start", form, map[string]string{"Sec-Fetch-Site": "same-origin"}, nil); resp.StatusCode != http.StatusFound {
+		t.Fatalf("same-origin POST /auth/start: %d", resp.StatusCode)
+	}
+	if resp, _ := e.do(http.MethodPost, "a.example.com", "/auth/start", form, map[string]string{"Sec-Fetch-Site": "cross-site"}, nil); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-site POST /auth/start: %d", resp.StatusCode)
+	}
+}
+
+func TestSSOCallbackSetsSessionBehindProxy(t *testing.T) {
+	e := setupMode(t, false)
+	if _, err := e.people.AddMember(e.siteA.ID, "m@x.io", models.RoleAdmin, false); err != nil {
+		t.Fatal(err)
+	}
+	proxied := map[string]string{"X-Forwarded-Proto": "https", "X-Forwarded-For": "203.0.113.9"}
+	resp, _ := e.do(http.MethodGet, "a.example.com", "/auth/start", nil, proxied, nil)
+	authURL, err := url.Parse(resp.Header.Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := authURL.Query().Get("redirect_uri"); got != "https://a.example.com/auth/callback" {
+		t.Fatalf("redirect_uri = %q", got)
+	}
+	if c := cookieOf(resp, "ntx_oauth"); c == nil || !c.Secure {
+		t.Fatalf("flow cookie not Secure: %+v", c)
+	}
+	sess := cookieOf(e.ssoLogin("a.example.com", "m@x.io", proxied), "ntx_session")
+	if sess == nil || !sess.Secure {
+		t.Fatalf("session cookie not Secure: %+v", sess)
+	}
+}
+
+// The provider budget must leave room to write the 502 page before the
+// server's write deadline, which starts when the request arrives.
+func TestProviderBudgetFitsWriteTimeout(t *testing.T) {
+	if handlers.DefaultProviderTimeout > WriteTimeout-3*time.Second {
+		t.Fatalf("provider budget %v leaves too little of the %v write timeout", handlers.DefaultProviderTimeout, WriteTimeout)
+	}
+}
+
+// Review Focus 2, hanging variant: a provider that accepts connections and
+// never answers still gets the 502 page, not a dropped connection.
+func TestHangingProviderGets502(t *testing.T) {
+	hole, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { hole.Close() })
+	e := setupMode(t, true, func(d *handlers.Deps) {
+		d.IssuerFor = func(string, string) string { return "http://" + hole.Addr().String() }
+		d.ProviderTimeout = 300 * time.Millisecond
+	})
+	start := time.Now()
+	resp, body := e.do(http.MethodGet, "a.example.com", "/auth/start", nil, nil, nil)
+	if resp.StatusCode != http.StatusBadGateway || !strings.Contains(body, "reach the sign-in provider") {
+		t.Fatalf("hanging provider: %d %s", resp.StatusCode, body)
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Fatalf("took %v; the provider budget wasn't applied", took)
 	}
 }

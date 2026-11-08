@@ -10,12 +10,16 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/nod/ntx/internal/adminui"
 	"github.com/nod/ntx/internal/auth"
+	"github.com/nod/ntx/internal/authz"
 	"github.com/nod/ntx/internal/models"
+	"github.com/nod/ntx/internal/people"
 	"github.com/nod/ntx/internal/sitectx"
 	"github.com/nod/ntx/internal/sitereg"
+	"github.com/nod/ntx/internal/sso"
 	"github.com/nod/ntx/internal/themes"
 )
 
@@ -95,11 +99,34 @@ func templateFuncs() template.FuncMap {
 	}
 }
 
+// DefaultProviderTimeout is the per-request budget for the sign-in
+// provider. It must leave time to write the error page inside the server's
+// write timeout (10s), or a hung provider gets a dropped connection
+// instead of "couldn't reach the sign-in provider".
+const DefaultProviderTimeout = 6 * time.Second
+
 // Deps is everything the handlers need.
 type Deps struct {
-	Sites            *models.SiteStore
-	Posts            *models.PostStore // unscoped; handlers call ForSite
-	Users            *models.UserStore
+	Sites       *models.SiteStore
+	Posts       *models.PostStore // unscoped; handlers call ForSite
+	Users       *models.UserStore
+	Memberships *models.MembershipStore
+	Identities  *models.IdentityStore
+	Invites     *models.InviteStore
+	Sessions    *models.SessionStore
+	People      *people.Service
+	SSO         *sso.Client
+	// IssuerFor maps a site's provider to its configured issuer; nil means
+	// sso.Issuer. Tests point it at a fake provider.
+	IssuerFor func(providerType, domain string) string
+	// ProviderTimeout bounds all talk with the sign-in provider in one
+	// request (discovery, code exchange, keys); 0 means
+	// DefaultProviderTimeout.
+	ProviderTimeout time.Duration
+	// SessionSecret signs the ntx_oauth flow cookie; EncryptionKey opens
+	// provider client secrets.
+	SessionSecret    []byte
+	EncryptionKey    []byte
 	Registry         *sitereg.Registry
 	Auth             *auth.Manager
 	Limiter          *auth.Limiter
@@ -199,15 +226,43 @@ func (h *Handler) render(w http.ResponseWriter, site *models.Site, name string, 
 
 // admin renders an embedded admin page with the shared keys filled in.
 func (h *Handler) admin(w http.ResponseWriter, r *http.Request, page string, data map[string]any) {
+	h.adminStatus(w, r, http.StatusOK, page, data)
+}
+
+func (h *Handler) adminStatus(w http.ResponseWriter, r *http.Request, status int, page string, data map[string]any) {
 	if data == nil {
 		data = map[string]any{}
 	}
-	data["Actor"] = auth.ActorFrom(r)
-	data["Site"] = sitectx.From(r)
+	site := sitectx.From(r)
+	actor := auth.ActorFrom(r)
+	data["Actor"] = actor
+	data["Site"] = site
+	data["IsSiteAdmin"] = site != nil && authz.SiteAdmin(actor)
+	if site != nil {
+		data["ProviderName"] = providerName(site.ProviderType)
+	} else {
+		data["ProviderName"] = ""
+	}
 	if _, ok := data["Error"]; !ok {
 		data["Error"] = ""
 	}
-	adminui.Render(w, page, data)
+	adminui.RenderStatus(w, status, page, data)
+}
+
+// message renders a plain admin page with a title, a sentence and an
+// optional link.
+func (h *Handler) message(w http.ResponseWriter, r *http.Request, status int, title, msg, linkHref, linkText string) {
+	h.adminStatus(w, r, status, "message", map[string]any{"Title": title, "Message": msg, "LinkHref": linkHref, "LinkText": linkText})
+}
+
+func providerName(providerType string) string {
+	switch providerType {
+	case models.ProviderGoogle:
+		return "Google"
+	case models.ProviderAuth0:
+		return "Auth0"
+	}
+	return ""
 }
 
 func (h *Handler) serverError(w http.ResponseWriter, err error) {
@@ -230,7 +285,26 @@ func (h *Handler) RequireSiteAdmin(next http.Handler) http.Handler {
 			h.notFound(w)
 		case a == nil:
 			http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
-		case !a.CanAdminSite():
+		case !authz.SiteAdmin(a):
+			http.Error(w, "Forbidden", http.StatusForbidden)
+		default:
+			next.ServeHTTP(w, r)
+		}
+	})
+}
+
+// RequireMember gates the pages every member of the site may open (posts):
+// anonymous requests go to sign-in, the platform host has none, and a
+// signed-in actor with no part in this site gets 403.
+func (h *Handler) RequireMember(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		a := auth.ActorFrom(r)
+		switch {
+		case sitectx.From(r) == nil:
+			h.notFound(w)
+		case a == nil:
+			http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+		case !authz.SiteMember(a):
 			http.Error(w, "Forbidden", http.StatusForbidden)
 		default:
 			next.ServeHTTP(w, r)

@@ -5,16 +5,19 @@
     <h1>posts</h1>
     <a href="/admin/posts/new" class="button primary">new post</a>
   </div>
+  {{if .ShowStats}}
   <p class="stats">
     <span>total {{.Total}}</span> · <span>published {{.Published}}</span> · <span>drafts {{.Drafts}}</span> · <span>tags {{.TagCount}}</span>
   </p>
+  {{end}}
   <input type="search" placeholder="filter posts…" autocomplete="off" data-filter-list="post-list" aria-label="filter posts">
   <ul class="list" id="post-list">
     {{range .Posts}}
     <li data-title="{{.Title}}" data-slug="{{.Slug}}">
       <a href="/admin/posts/{{.ID}}/edit">{{.Title}}</a>
       <span class="muted">{{.Slug}}</span>
-      {{if .Published}}<span class="badge ok">published</span>{{else}}<span class="badge">draft</span>{{end}}
+      <span class="badge{{if eq .Status "published"}} ok{{end}}">{{.Status}}</span>
+      <span class="muted">{{.Author}}</span>
       <span class="muted">{{.UpdatedAt.Format "2006-01-02"}}</span>
     </li>
     {{else}}

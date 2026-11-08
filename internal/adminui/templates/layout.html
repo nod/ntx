@@ -6,14 +6,15 @@
   <title>{{block "title" .}}admin{{end}} — ntx</title>
   <link rel="stylesheet" href="/admin/assets/admin.css">
   <script src="/admin/assets/admin.js" defer></script>
+  {{block "head" .}}{{end}}
 </head>
 <body>
   <header class="bar">
     <span class="brand">ntx{{with .Site}} · {{.Name}}{{else}} · platform{{end}}</span>
     {{with .Actor}}
     <nav>
-      {{if $.Site}}<a href="/admin/posts">posts</a><a href="/admin/settings">settings</a>{{end}}
-      {{if .IsPlatform}}<a href="/admin/platform/sites">sites</a>{{end}}
+      {{if $.Site}}<a href="/admin/posts">posts</a>{{if $.IsSiteAdmin}}<a href="/admin/members">members</a><a href="/admin/settings">settings</a>{{end}}{{end}}
+      {{if .IsPlatform}}<a href="/admin/platform/sites">sites</a><a href="/admin/platform/users">users</a>{{end}}
       <form method="POST" action="/admin/logout" class="inline"><button type="submit" class="link">sign out</button></form>
     </nav>
     {{end}}

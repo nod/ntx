@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -19,8 +20,10 @@ import (
 	"github.com/nod/ntx/internal/db"
 	"github.com/nod/ntx/internal/handlers"
 	"github.com/nod/ntx/internal/models"
+	"github.com/nod/ntx/internal/people"
 	"github.com/nod/ntx/internal/server"
 	"github.com/nod/ntx/internal/sitereg"
+	"github.com/nod/ntx/internal/sso"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -220,11 +223,23 @@ func openApp(cfgFile string) (*app, error) {
 		closeDB()
 		return nil, fmt.Errorf("loading sites: %w", err)
 	}
-	am := auth.NewManager(models.NewSessionStore(database), users, cfg.RootPasswordHash, !cfg.Dev)
+	mems := models.NewMembershipStore(database)
+	ids := models.NewIdentityStore(database)
+	invites := models.NewInviteStore(database)
+	sessions := models.NewSessionStore(database)
+	am := auth.NewManager(sessions, users, mems, cfg.RootPasswordHash, !cfg.Dev)
 	h := handlers.New(handlers.Deps{
 		Sites:            sites,
 		Posts:            models.NewPostStore(database),
 		Users:            users,
+		Memberships:      mems,
+		Identities:       ids,
+		Invites:          invites,
+		Sessions:         sessions,
+		People:           people.New(users, ids, mems, invites),
+		SSO:              sso.NewClient(&http.Client{Timeout: handlers.DefaultProviderTimeout}),
+		SessionSecret:    []byte(cfg.SessionSecret),
+		EncryptionKey:    cfg.EncryptionKey,
 		Registry:         reg,
 		Auth:             am,
 		Limiter:          auth.NewLimiter(),

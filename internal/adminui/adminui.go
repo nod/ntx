@@ -17,7 +17,10 @@ import (
 //go:embed templates/*.html assets/*
 var files embed.FS
 
-var pageNames = []string{"login", "posts", "editor", "settings", "platform_sites", "platform_site_form", "platform_site_delete"}
+var pageNames = []string{
+	"login", "posts", "editor", "settings", "platform_sites", "platform_site_form", "platform_site_delete",
+	"message", "signed_in", "invite", "members", "platform_users", "platform_user",
+}
 
 // pages holds one template set per page: the shared layout plus that page.
 var pages = func() map[string]*template.Template {
@@ -29,8 +32,13 @@ var pages = func() map[string]*template.Template {
 	return m
 }()
 
-// Render writes the admin page named page. data may be nil.
+// Render writes the admin page named page with status 200. data may be nil.
 func Render(w http.ResponseWriter, page string, data map[string]any) {
+	RenderStatus(w, http.StatusOK, page, data)
+}
+
+// RenderStatus writes the admin page named page with the given status.
+func RenderStatus(w http.ResponseWriter, status int, page string, data map[string]any) {
 	t, ok := pages[page]
 	if !ok {
 		log.Printf("adminui: unknown page %q", page)
@@ -44,6 +52,7 @@ func Render(w http.ResponseWriter, page string, data map[string]any) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
 	w.Write(buf.Bytes())
 }
 

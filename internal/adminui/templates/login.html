@@ -2,6 +2,10 @@
 {{define "content"}}
 <section class="narrow">
   <h1>sign in</h1>
+  {{with .ProviderName}}
+  <p><a href="/auth/start" class="button primary">Sign in with {{.}}</a></p>
+  <p class="muted">Root signs in below.</p>
+  {{end}}
   <form method="POST" action="/admin/login" class="stack">
     <label for="username">username</label>
     <input type="text" id="username" name="username" value="root" autocomplete="username" required>

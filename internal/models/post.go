@@ -20,6 +20,9 @@ type Post struct {
 	Body      string
 	Published bool
 	Tags      []string
+	// AuthorID is who wrote the post; nil once the author's account is
+	// deleted. Set on Create, never changed by Update.
+	AuthorID *int64
 	// FirstPublishedAt is set the first time the post is published and
 	// never cleared: it is what "has ever been live" means.
 	FirstPublishedAt *time.Time
@@ -91,6 +94,26 @@ func (s *PostStore) List(publishedOnly bool) ([]Post, error) {
 	return posts, nil
 }
 
+// LiveOnce reports whether the post has ever been published.
+func (p *Post) LiveOnce() bool { return p.FirstPublishedAt != nil }
+
+// ListByAuthor returns one author's posts on this site, drafts included,
+// newest first.
+func (s *PostStore) ListByAuthor(authorID int64) ([]Post, error) {
+	var records []dbPost
+	err := s.db.Preload("Tags", "site_id = ?", s.siteID).
+		Where("site_id = ? AND author_id = ?", s.siteID, authorID).
+		Order("created_at desc").Find(&records).Error
+	if err != nil {
+		return nil, err
+	}
+	posts := make([]Post, len(records))
+	for i, r := range records {
+		posts[i] = toPost(r)
+	}
+	return posts, nil
+}
+
 func (s *PostStore) ListByTag(tag string) ([]Post, error) {
 	var records []dbPost
 	err := s.db.Preload("Tags", "site_id = ?", s.siteID).
@@ -151,6 +174,7 @@ func (s *PostStore) Create(p *Post) error {
 		Body:      p.Body,
 		Published: p.Published,
 		Tags:      tags,
+		AuthorID:  p.AuthorID,
 	}
 	if p.Published {
 		now := time.Now()
@@ -283,6 +307,7 @@ func toPost(r dbPost) Post {
 		UpdatedAt: r.UpdatedAt,
 
 		FirstPublishedAt: r.FirstPublishedAt,
+		AuthorID:         r.AuthorID,
 	}
 	for _, t := range r.Tags {
 		p.Tags = append(p.Tags, t.Name)

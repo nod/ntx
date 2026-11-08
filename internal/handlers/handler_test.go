@@ -15,8 +15,17 @@ import (
 	"github.com/nod/ntx/internal/auth"
 	"github.com/nod/ntx/internal/db"
 	"github.com/nod/ntx/internal/models"
+	"github.com/nod/ntx/internal/people"
+	"github.com/nod/ntx/internal/secretbox"
 	"github.com/nod/ntx/internal/sitectx"
 	"github.com/nod/ntx/internal/sitereg"
+	"github.com/nod/ntx/internal/sso"
+	"github.com/nod/ntx/internal/sso/ssotest"
+)
+
+var (
+	testEncKey        = []byte("0123456789abcdef0123456789abcdef")
+	testSessionSecret = []byte("session-secret-session-secret-xx")
 )
 
 const platformHost = "admin.example.com"
@@ -49,6 +58,14 @@ type env struct {
 	reg      *sitereg.Registry
 	sites    *models.SiteStore
 	posts    *models.PostStore
+	users    *models.UserStore
+	mems     *models.MembershipStore
+	ids      *models.IdentityStore
+	invites  *models.InviteStore
+	sessions *models.SessionStore
+	people   *people.Service
+	am       *auth.Manager
+	fake     *ssotest.Provider
 	themes   string
 	router   http.Handler
 	siteA    *models.Site
@@ -75,14 +92,29 @@ func newEnv(t *testing.T) *env {
 	if err := sites.Create(a, platformHost); err != nil {
 		t.Fatal(err)
 	}
+	// Site A signs in through a fake Auth0 tenant.
+	fake := ssotest.New(t)
+	sealed, err := secretbox.Seal(testEncKey, fake.ClientSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sites.SetProvider(a.ID, models.ProviderSettings{Type: models.ProviderAuth0, Domain: "a-tenant.example.com", ClientID: fake.ClientID}, sealed); err != nil {
+		t.Fatal(err)
+	}
 	reg, err := sitereg.New(sites)
 	if err != nil {
 		t.Fatal(err)
 	}
+	a = reg.ByHost("a.example.com")
+	mems, ids, invites, sessions := models.NewMembershipStore(d), models.NewIdentityStore(d), models.NewInviteStore(d), models.NewSessionStore(d)
+	ppl := people.New(users, ids, mems, invites)
 	rootHash, _ := auth.HashPassword("rootpass")
-	am := auth.NewManager(models.NewSessionStore(d), users, rootHash, false)
+	am := auth.NewManager(sessions, users, mems, rootHash, false)
 	h := New(Deps{
 		Sites: sites, Posts: models.NewPostStore(d), Users: users, Registry: reg,
+		Memberships: mems, Identities: ids, Invites: invites, Sessions: sessions, People: ppl,
+		SSO: sso.NewClient(nil), IssuerFor: func(string, string) string { return fake.URL },
+		SessionSecret: testSessionSecret, EncryptionKey: testEncKey,
 		Auth: am, Limiter: auth.NewLimiter(), ThemesPath: themesRoot,
 		PlatformHostname: platformHost, RootPasswordHash: rootHash, Dev: true,
 	})
@@ -111,11 +143,24 @@ func newEnv(t *testing.T) *env {
 	}))
 	h.Mount(r)
 
-	return &env{t: t, h: h, reg: reg, sites: sites, posts: models.NewPostStore(d), themes: themesRoot, router: r, siteA: a, rootPass: "rootpass"}
+	return &env{
+		t: t, h: h, reg: reg, sites: sites, posts: models.NewPostStore(d), users: users,
+		mems: mems, ids: ids, invites: invites, sessions: sessions, people: ppl, am: am, fake: fake,
+		themes: themesRoot, router: r, siteA: a, rootPass: "rootpass",
+	}
 }
 
 // do sends one request to the router on host, carrying cookie if set.
 func (e *env) do(method, host, path string, form url.Values, cookie *http.Cookie) *httptest.ResponseRecorder {
+	e.t.Helper()
+	if cookie == nil {
+		return e.doWith(method, host, path, form)
+	}
+	return e.doWith(method, host, path, form, cookie)
+}
+
+// doWith is do with any number of cookies.
+func (e *env) doWith(method, host, path string, form url.Values, cookies ...*http.Cookie) *httptest.ResponseRecorder {
 	e.t.Helper()
 	var req *http.Request
 	if form != nil {
@@ -125,8 +170,8 @@ func (e *env) do(method, host, path string, form url.Values, cookie *http.Cookie
 		req = httptest.NewRequest(method, path, nil)
 	}
 	req.Host = host
-	if cookie != nil {
-		req.AddCookie(cookie)
+	for _, c := range cookies {
+		req.AddCookie(c)
 	}
 	rec := httptest.NewRecorder()
 	e.router.ServeHTTP(rec, req)
@@ -147,6 +192,74 @@ func (e *env) login(host string) *http.Cookie {
 	}
 	e.t.Fatal("no session cookie after login")
 	return nil
+}
+
+func cookieNamed(rec *httptest.ResponseRecorder, name string) *http.Cookie {
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == name {
+			return c
+		}
+	}
+	return nil
+}
+
+// startSSO begins a sign-in on host as id (with an invite token, if set)
+// and returns the flow cookie and the provider's redirect back to us.
+func (e *env) startSSO(host string, id ssotest.Identity, invite string) (flow *http.Cookie, callback *url.URL) {
+	e.t.Helper()
+	e.fake.SetNext(id)
+	var rec *httptest.ResponseRecorder
+	if invite != "" {
+		rec = e.do(http.MethodPost, host, "/auth/start", url.Values{"invite": {invite}}, nil)
+	} else {
+		rec = e.do(http.MethodGet, host, "/auth/start", nil, nil)
+	}
+	if rec.Code != http.StatusFound {
+		e.t.Fatalf("/auth/start on %s: status %d, body %s", host, rec.Code, rec.Body.String())
+	}
+	flow = cookieNamed(rec, "ntx_oauth")
+	if flow == nil {
+		e.t.Fatal("/auth/start set no ntx_oauth cookie")
+	}
+	back, err := url.Parse(e.fake.Authorize(e.t, rec.Header().Get("Location")))
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return flow, back
+}
+
+// ssoLogin runs a whole provider sign-in on host and returns the callback
+// response and the session cookie it set, if any.
+func (e *env) ssoLogin(host string, id ssotest.Identity, invite string) (*httptest.ResponseRecorder, *http.Cookie) {
+	e.t.Helper()
+	flow, back := e.startSSO(host, id, invite)
+	rec := e.doWith(http.MethodGet, host, back.RequestURI(), nil, flow)
+	return rec, cookieNamed(rec, "ntx_session")
+}
+
+// verified is a provider identity with a verified email.
+func verified(sub, email string) ssotest.Identity {
+	return ssotest.Identity{Subject: sub, Email: email, Name: "Name " + sub, EmailVerified: true}
+}
+
+// member adds a person to site A.
+func (e *env) member(email, role string, canPublish bool) *models.User {
+	e.t.Helper()
+	u, err := e.people.AddMember(e.siteA.ID, email, role, canPublish)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return u
+}
+
+// sessionFor signs u in on site A directly, skipping the provider.
+func (e *env) sessionFor(u *models.User) *http.Cookie {
+	e.t.Helper()
+	rec := httptest.NewRecorder()
+	if err := e.am.Login(rec, u, &e.siteA.ID); err != nil {
+		e.t.Fatal(err)
+	}
+	return cookieNamed(rec, "ntx_session")
 }
 
 func (e *env) storedSite(key string) *models.Site {
