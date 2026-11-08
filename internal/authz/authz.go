@@ -54,6 +54,16 @@ func CanDeletePost(a *auth.Actor, p *models.Post) bool {
 	return SiteAdmin(a) || (own(a, p) && (CanPublishOwn(a) || !p.LiveOnce()))
 }
 
+// SavesAsPending: the actor's edits to p wait for a site admin, as p's
+// pending revision -- their own live-once post, without can_publish.
+// Never true where CanEditPost is.
+func SavesAsPending(a *auth.Actor, p *models.Post) bool {
+	return own(a, p) && p.LiveOnce() && !CanPublishOwn(a)
+}
+
+// CanReviewChanges: publish or discard p's pending revision.
+func CanReviewChanges(a *auth.Actor, p *models.Post) bool { return SiteAdmin(a) }
+
 func CanManageMembers(a *auth.Actor) bool { return SiteAdmin(a) }
 
 // CanManageMember: site admins can't change or remove a platform admin's
