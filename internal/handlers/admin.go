@@ -166,9 +166,12 @@ func (h *Handler) editor(w http.ResponseWriter, r *http.Request, site *models.Si
 		return
 	}
 	data["Pending"] = rev
+	// Base is the post as this editor shows it. A save that turns into
+	// pending changes -- including a draft published while it was open --
+	// compares against it to warn the reviewer.
+	data["Base"] = post.UpdatedAt.Format(time.RFC3339Nano)
 	if authz.SavesAsPending(a, post) {
 		data["Mode"] = "pending"
-		data["Base"] = post.UpdatedAt.Format(time.RFC3339Nano)
 		if rev != nil {
 			shown := *post
 			shown.Title, shown.Body, shown.Tags = rev.Title, rev.Body, rev.Tags
@@ -256,9 +259,11 @@ func (h *Handler) UpdatePost(w http.ResponseWriter, r *http.Request) {
 				h.forbidden(w, r)
 				return
 			}
+			// Without the base the editor sent, there's no telling what the
+			// contributor saw: the zero time marks the revision stale.
 			base, err := time.Parse(time.RFC3339Nano, r.FormValue("base"))
 			if err != nil {
-				base = existing.UpdatedAt
+				base = time.Time{}
 			}
 			if _, err := ps.SavePending(existing.ID, a.User.ID, updated.Title, updated.Body, updated.Tags, base); err != nil {
 				h.serverError(w, err)

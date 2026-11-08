@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/nod/ntx/internal/models"
 )
@@ -177,21 +176,23 @@ func TestDraftPublishedWhileContributorEdits(t *testing.T) {
 	me := e.member("me@x.io", models.RoleContributor, false)
 	d := e.authored(me, "d", false)
 	ps := e.posts.ForSite(e.siteA.ID)
-	d, _ = ps.GetByID(d.ID)
 	c := e.sessionFor(me)
-	if rec := e.do(http.MethodGet, hostA, "/admin/posts/"+itoa(d.ID)+"/edit", nil, c); rec.Code != http.StatusOK {
-		t.Fatalf("draft editor: %d", rec.Code)
+	// The contributor opens the draft in the real editor form.
+	edit := e.do(http.MethodGet, hostA, "/admin/posts/"+itoa(d.ID)+"/edit", nil, c)
+	if edit.Code != http.StatusOK {
+		t.Fatalf("draft editor: %d", edit.Code)
 	}
-	if rec := e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(d.ID), postForm("Title d", "d", "publish"), e.siteAdminCookie()); rec.Code != http.StatusSeeOther {
+	base := editorBase(t, edit)
+	if rec := e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(d.ID), postForm("Fixed by admin", "d", "publish"), e.siteAdminCookie()); rec.Code != http.StatusSeeOther {
 		t.Fatalf("admin publish: %d", rec.Code)
 	}
 	f := postForm("Late edit", "d", "save")
-	f.Set("base", d.UpdatedAt.Format(time.RFC3339Nano))
+	f.Set("base", base)
 	if rec := e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(d.ID), f, c); rec.Code != http.StatusSeeOther {
 		t.Fatalf("late save: %d %s", rec.Code, rec.Body.String())
 	}
 	post, _ := ps.GetByID(d.ID)
-	if !post.Published || post.Title != "Title d" {
+	if !post.Published || post.Title != "Fixed by admin" {
 		t.Fatalf("the late save changed the live post: %+v", post)
 	}
 	rev, _ := ps.GetPending(d.ID)
@@ -222,6 +223,22 @@ func TestEditorPendingNotices(t *testing.T) {
 	mine := text(e.do(http.MethodGet, hostA, editPath, nil, e.sessionFor(me)))
 	if !strings.Contains(mine, "Your earlier changes are waiting for a site admin.") || strings.Contains(mine, "/pending") {
 		t.Fatalf("publishing contributor's editor: %s", mine)
+	}
+}
+
+// A pending save with no base (an old or hand-made form) can't prove the
+// contributor saw the current post, so it must read as stale.
+func TestPendingSaveWithoutBaseIsStale(t *testing.T) {
+	e := newEnv(t)
+	me := e.member("me@x.io", models.RoleContributor, false)
+	p := e.authored(me, "live", true)
+	if rec := e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(p.ID), postForm("No base", "live", "save"), e.sessionFor(me)); rec.Code != http.StatusSeeOther {
+		t.Fatalf("save: %d", rec.Code)
+	}
+	ps := e.posts.ForSite(e.siteA.ID)
+	post, _ := ps.GetByID(p.ID)
+	if rev, _ := ps.GetPending(p.ID); rev == nil || !rev.Stale(post) {
+		t.Fatalf("a revision saved without a base should be stale: %+v", rev)
 	}
 }
 

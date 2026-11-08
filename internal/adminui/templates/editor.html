@@ -17,7 +17,7 @@
   {{/* A post that failed to save before it was ever created comes back
        with ID 0: it is still a new post. */}}
   <form method="POST" action="{{if and .Post .Post.ID}}/admin/posts/{{.Post.ID}}{{else}}/admin/posts{{end}}" class="stack">
-    {{if eq .Mode "pending"}}<input type="hidden" name="base" value="{{.Base}}">{{end}}
+    {{if .Base}}<input type="hidden" name="base" value="{{.Base}}">{{end}}
     <label for="title">title</label>
     <input type="text" id="title" name="title" value="{{with .Post}}{{.Title}}{{end}}"{{if ne .Mode "pending"}} data-slug-source="slug"{{end}} required>
     <label for="slug">slug</label>
