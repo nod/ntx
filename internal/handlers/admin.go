@@ -78,6 +78,9 @@ type postRow struct {
 	models.Post
 	Status string // draft, published or unpublished
 	Author string
+	// Pending: the post has changes waiting for a site admin; Review:
+	// this actor can publish or discard them.
+	Pending, Review bool
 }
 
 func postStatus(p *models.Post) string {
@@ -119,19 +122,17 @@ func (h *Handler) Posts(w http.ResponseWriter, r *http.Request) {
 			h.serverError(w, err)
 			return
 		}
+		pending, err := ps.PendingIDs()
+		if err != nil {
+			h.serverError(w, err)
+			return
+		}
 		rows := make([]postRow, len(posts))
 		for i, p := range posts {
-			rows[i] = postRow{Post: p, Status: postStatus(&p), Author: "former member"}
+			rows[i] = postRow{Post: p, Status: postStatus(&p), Author: "former member", Pending: pending[p.ID]}
+			rows[i].Review = rows[i].Pending && authz.CanReviewChanges(a, &p)
 			if p.AuthorID != nil {
-				if u := authors[*p.AuthorID]; u != nil {
-					rows[i].Author = u.Email
-					if u.Name != "" {
-						rows[i].Author = u.Name
-					}
-					if u.Email == "" && u.Name == "" {
-						rows[i].Author = "root"
-					}
-				}
+				rows[i].Author = authorLabel(authors[*p.AuthorID])
 			}
 		}
 		data := map[string]any{"Posts": rows, "ShowStats": admin}

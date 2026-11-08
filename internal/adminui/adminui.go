@@ -18,7 +18,7 @@ import (
 var files embed.FS
 
 var pageNames = []string{
-	"login", "posts", "editor", "settings", "platform_sites", "platform_site_form", "platform_site_delete",
+	"login", "posts", "editor", "pending", "settings", "platform_sites", "platform_site_form", "platform_site_delete",
 	"message", "signed_in", "invite", "members", "platform_users", "platform_user",
 }
 

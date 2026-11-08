@@ -35,3 +35,10 @@ th, td { text-align: left; padding: .5rem; border-bottom: 1px solid var(--line);
 .notice p { margin: 0 0 .5rem; }
 input.copy { width: 100%; font-family: ui-monospace, monospace; }
 h2 { margin-top: 2rem; }
+.notice.warn { border-color: var(--danger); }
+.badge.warn { color: var(--danger); border-color: var(--danger); }
+.compare { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1rem 0; }
+.compare > div { min-width: 0; border: 1px solid var(--line); border-radius: 6px; padding: .75rem 1rem; }
+.compare pre.body { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.actions form { display: inline; }
+@media (max-width: 640px) { .compare { grid-template-columns: 1fr; } }

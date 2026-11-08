@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-var testPages = []string{"login", "posts", "editor", "settings", "platform_sites", "platform_site_form", "platform_site_delete"}
+var testPages = []string{"login", "posts", "editor", "pending", "settings", "platform_sites", "platform_site_form", "platform_site_delete"}
 
 func TestEveryPageRenders(t *testing.T) {
 	for _, p := range testPages {

@@ -8,7 +8,7 @@ A self-hosted site server written in Go: one binary that serves blogs, content s
 
 **ntx is multi-tenant, and sites are managed in the browser.** `ntx.toml` holds only server settings. Sites, their sections, posts, tags and sessions live in the database. A request is matched to a site by its `Host` header (lowercased, port stripped) against each site's `hostname`, or to the configured `platform_hostname`, where root signs in before any site exists. Any code touching content must stay inside the resolved site's scope; that is the invariant this codebase exists to protect.
 
-The design for roles and SSO is `docs/superpowers/specs/2026-11-07-roles-and-sso-design.md`. Phases 1 (sites in the database, root, platform views, themes) and 2 (people, memberships, invites, Google/Auth0 SSO, platform admins) are built. Phase 3 (pending revisions for contributors without `can_publish`) isn't: until then such a contributor can't edit a post once it has been published. `post_revisions` already exists in the schema.
+The design for roles and SSO is `docs/superpowers/specs/2026-11-07-roles-and-sso-design.md`. All three phases are built: 1 (sites in the database, root, platform views, themes), 2 (people, memberships, invites, Google/Auth0 SSO, platform admins) and 3 (pending revisions for contributors without `can_publish`).
 
 ## Module and Go version
 
@@ -33,6 +33,7 @@ internal/
   models/invite.go             # InviteStore: hashed tokens, transactional Accept
   models/session.go            # SessionStore: DB-backed sessions (token hash, host-bound)
   models/post.go               # PostStore: site-scoped posts and tags (ForSite), authors
+  models/revision.go           # PostStore pending revisions: save, publish (stale check), discard
   secretbox/secretbox.go       # AES-256-GCM for provider client secrets
   sso/                         # OIDC client (go-oidc), signed ntx_oauth flow state; ssotest = fake provider
   people/people.go             # sign-in policy (invite → identity → email match → membership), AddMember
@@ -86,7 +87,8 @@ One goose migration per dialect, `100_initial.sql`. It holds every table the ful
 - **Identities**: (configured issuer, subject) → user. `Link` refuses a second subject from the same issuer for one user (`ErrIdentityConflict`, the reassigned-account guard).
 - **Invites**: sha256 of the token, 7-day expiry, one unused row per (site, email). `Accept` is one transaction: conditional `used_at` update, find-or-create the user, link the identity, add the membership.
 - **Sessions** (`models.Session`): the cookie holds a random token, and the DB stores its sha256. `SiteID` is the site the session was issued on, or nil for root on the platform host. Root sessions store `RootDigest(root_password_hash)`. `last_seen_at` is written at most once a minute.
-- **Posts** (`models.PostStore`): every query is scoped by `ForSite(siteID)`, with the site condition written as SQL; GORM drops zero-valued struct fields from a struct-based Where. `FirstPublishedAt` is set on the first publish and never cleared. `AllTags` returns only tags on published posts, because it feeds public pages; `Stats` counts every tag.
+- **Posts** (`models.PostStore`): every query is scoped by `ForSite(siteID)`, with the site condition written as SQL; GORM drops zero-valued struct fields from a struct-based Where. `FirstPublishedAt` is set on the first publish and never cleared. `AllTags` returns only tags on published posts, because it feeds public pages; `Stats` counts every tag. `UpdateContent` saves content without touching the published state (the editor's Save uses it); `Update` also writes `published`.
+- **Pending revisions** (`models.Revision`, `post_revisions`, methods on `PostStore`): at most one per post, only on live-once posts (`ErrNotLiveOnce`). Title, body and tags, never slug. `BaseUpdatedAt` is the post's `UpdatedAt` when the contributor opened the editor (sent back in the form's hidden `base` field), kept on later saves; `Stale(post)` compares the two. The revision's `UpdatedAt` is its version: `PublishPending` and `DiscardPending` take the version the admin was shown and return `ErrRevisionChanged` if it moved, and `PublishPending` returns `ErrStale` unless confirmed. Revision timestamps are written truncated to microseconds, so SQLite and Postgres store exactly what Go holds; compare only values read back from the database, with `Equal`.
 
 Store methods return `*models.ValidationError` for problems with user input. Handlers show its message on the form; any other error is a 500.
 
@@ -133,7 +135,7 @@ After any write to sites or sections, call `Registry.Reload()`. ntx is single-in
 
 ### Authorization
 
-`internal/authz` is the role table. Handlers call it (`SiteAdmin`, `SiteMember`, `CanSeePost`, `CanEditPost`, `CanPublishPost`, `CanDeletePost`, `CanManageMember`, `CanChangeUser`, …) and never compare roles themselves. Route groups: `RequireMember` (posts), `RequireSiteAdmin` (members, settings), `RequirePlatform` (platform views). A post a contributor can't see is a 404.
+`internal/authz` is the role table. Handlers call it (`SiteAdmin`, `SiteMember`, `CanSeePost`, `CanEditPost`, `SavesAsPending`, `CanReviewChanges`, `CanPublishPost`, `CanDeletePost`, `CanManageMember`, `CanChangeUser`, …) and never compare roles themselves. `CanEditPost` means edits apply directly; `SavesAsPending` (never true together with it) means they become the post's pending revision. The review routes are `/admin/posts/{id}/pending` (GET), `.../pending/publish` and `.../pending/discard` (POST), in the `RequireMember` group, gated by `CanReviewChanges`. Route groups: `RequireMember` (posts), `RequireSiteAdmin` (members, settings), `RequirePlatform` (platform views). A post a contributor can't see is a 404.
 
 ## Themes and templates
 

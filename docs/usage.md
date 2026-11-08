@@ -101,13 +101,37 @@ a membership on that site. A Google or Auth0 login on its own grants nothing.
 | contributor | one site | their own posts; publishing only with **can publish** |
 
 - **Contributors without can publish** write drafts and edit or delete their own
-  drafts. They can't publish, and once one of their posts has been published
-  (by a site admin), they can no longer edit it.
+  drafts, but can't publish. Once a site admin has published one of their posts,
+  they can still edit it, but their changes wait for review (see below). They
+  can't change its slug, unpublish it or delete it.
 - **Contributors with can publish** publish, unpublish, edit and delete their own posts.
 - **Contributors** see only their own posts in the admin.
 - **Platform admins** sign in through the provider of a site where they are a member,
   and from there use **sites** and **users** like root. Revoking the flag, removing
   the membership or deleting the person takes effect on their next request.
+
+### Pending changes
+
+When a contributor without **can publish** saves an edit to a post that has
+been published, the post doesn't change. The edit is stored as the post's
+**pending changes**, and readers, `ntx generate` and the public tag list don't
+see it. Saving again replaces the pending changes; there is only ever one set
+per post.
+
+Site admins see a **pending changes** badge on the post in **posts**, and a
+**review** link to a page showing the current post and the pending changes side
+by side:
+
+- **Publish changes** copies the pending title, body and tags onto the post. It
+  doesn't publish or unpublish it: an unpublished post gets the new content and
+  stays unpublished.
+- **Discard** throws the pending changes away.
+
+If someone edited the post directly after the contributor started editing, the
+page warns that publishing will overwrite those edits, and the button becomes
+**publish anyway**. If the contributor saves again while you have the page open,
+publishing stops and shows you the newer version instead, so you never publish
+text you haven't seen.
 
 ### Setting up a site's sign-in provider
 
