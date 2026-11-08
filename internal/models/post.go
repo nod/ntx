@@ -221,6 +221,32 @@ func (s *PostStore) Update(p *Post) error {
 	})
 }
 
+// UpdateContent saves a post's slug, title, body and tags, leaving its
+// published state alone: a plain save must never publish or unpublish,
+// whatever the caller read earlier.
+func (s *PostStore) UpdateContent(p *Post) error {
+	if !slugRe.MatchString(p.Slug) {
+		return fmt.Errorf("invalid slug %q: must match %s", p.Slug, slugRe)
+	}
+	tags, err := s.resolveTags(p.Tags)
+	if err != nil {
+		return err
+	}
+	r := dbPost{ID: uint(p.ID)}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&r).Where("site_id = ?", s.siteID).Updates(map[string]any{
+			"slug": p.Slug, "title": p.Title, "body": p.Body,
+		})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return fmt.Errorf("post %d not found in site %d", p.ID, s.siteID)
+		}
+		return tx.Model(&r).Association("Tags").Replace(tags)
+	})
+}
+
 func (s *PostStore) Delete(id int64) error {
 	// Matches Update's contract: a cross-site id deletes nothing, and that
 	// has to be an error rather than a silent no-op.
@@ -278,6 +304,11 @@ func (s *PostStore) Stats() (total, published, drafts, tagCount int, err error) 
 // generated WHERE clause, so an unscoped store would look up tags by name
 // alone and attach another site's tag row to this site's post.
 func (s *PostStore) resolveTags(names []string) ([]dbTag, error) {
+	return s.resolveTagsOn(s.db, names)
+}
+
+// resolveTagsOn is resolveTags through db, which may be a transaction.
+func (s *PostStore) resolveTagsOn(db *gorm.DB, names []string) ([]dbTag, error) {
 	var tags []dbTag
 	for _, name := range names {
 		name = strings.TrimSpace(name)
@@ -285,7 +316,7 @@ func (s *PostStore) resolveTags(names []string) ([]dbTag, error) {
 			continue
 		}
 		var t dbTag
-		err := s.db.Where("site_id = ? AND name = ?", s.siteID, name).
+		err := db.Where("site_id = ? AND name = ?", s.siteID, name).
 			Attrs(dbTag{SiteID: s.siteID, Name: name}).
 			FirstOrCreate(&t).Error
 		if err != nil {
