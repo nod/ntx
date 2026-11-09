@@ -185,3 +185,28 @@ func authorOf(p *models.Post) any {
 	}
 	return *p.AuthorID
 }
+
+// TestPendingRules covers the two pending-changes rules over every actor
+// and post: only a contributor without can_publish, on their own live-once
+// post, saves as pending; only site-admin powers review.
+func TestPendingRules(t *testing.T) {
+	type key struct {
+		a *auth.Actor
+		p *models.Post
+	}
+	savesAsPending := map[key]bool{{contribNoPublish, ownLive}: true}
+	for _, a := range append(everyActor, anon) {
+		for _, p := range everyPost {
+			if got, want := SavesAsPending(a, p), savesAsPending[key{a, p}]; got != want {
+				t.Errorf("SavesAsPending(%s, post by %v live=%v) = %v, want %v", who(a), authorOf(p), p.LiveOnce(), got, want)
+			}
+			wantReview := a == root || a == platformContrib || a == siteAdmin
+			if got := CanReviewChanges(a, p); got != wantReview {
+				t.Errorf("CanReviewChanges(%s, post by %v) = %v, want %v", who(a), authorOf(p), got, wantReview)
+			}
+			if SavesAsPending(a, p) && CanEditPost(a, p) {
+				t.Errorf("%s on post by %v both edits directly and saves as pending", who(a), authorOf(p))
+			}
+		}
+	}
+}

@@ -21,7 +21,13 @@ type peopleFixture struct {
 
 func newPeople(t *testing.T) *peopleFixture {
 	t.Helper()
-	d := newTestSiteDB(t)
+	return newPeopleOn(t, newTestSiteDB(t))
+}
+
+// newPeopleOn builds the fixture on an already-open database, so the same
+// tests can run against Postgres (see revision_pg_test.go).
+func newPeopleOn(t *testing.T, d *gorm.DB) *peopleFixture {
+	t.Helper()
 	f := &peopleFixture{
 		db: d, sites: NewSiteStore(d), users: NewUserStore(d),
 		mems: NewMembershipStore(d), ids: NewIdentityStore(d), sess: NewSessionStore(d),

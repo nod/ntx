@@ -221,6 +221,49 @@ func (s *PostStore) Update(p *Post) error {
 	})
 }
 
+// ErrLiveOnce: UpdateDraft found the post already published once.
+var ErrLiveOnce = errors.New("post has been published")
+
+// UpdateContent saves a post's slug, title, body and tags, leaving its
+// published state alone: a plain save must never publish or unpublish,
+// whatever the caller read earlier.
+func (s *PostStore) UpdateContent(p *Post) error { return s.updateContent(p, false) }
+
+// UpdateDraft is UpdateContent for someone who may only edit
+// never-published drafts. The check is part of the write, so a post
+// published a moment earlier is left alone (ErrLiveOnce).
+func (s *PostStore) UpdateDraft(p *Post) error { return s.updateContent(p, true) }
+
+func (s *PostStore) updateContent(p *Post, draftOnly bool) error {
+	if !slugRe.MatchString(p.Slug) {
+		return fmt.Errorf("invalid slug %q: must match %s", p.Slug, slugRe)
+	}
+	tags, err := s.resolveTags(p.Tags)
+	if err != nil {
+		return err
+	}
+	r := dbPost{ID: uint(p.ID)}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		q := tx.Model(&r).Where("site_id = ?", s.siteID)
+		if draftOnly {
+			q = q.Where("first_published_at IS NULL")
+		}
+		res := q.Updates(map[string]any{"slug": p.Slug, "title": p.Title, "body": p.Body})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			if draftOnly {
+				if _, err := s.postInSite(tx, p.ID); err == nil {
+					return ErrLiveOnce
+				}
+			}
+			return fmt.Errorf("post %d not found in site %d", p.ID, s.siteID)
+		}
+		return tx.Model(&r).Association("Tags").Replace(tags)
+	})
+}
+
 func (s *PostStore) Delete(id int64) error {
 	// Matches Update's contract: a cross-site id deletes nothing, and that
 	// has to be an error rather than a silent no-op.
@@ -278,6 +321,11 @@ func (s *PostStore) Stats() (total, published, drafts, tagCount int, err error) 
 // generated WHERE clause, so an unscoped store would look up tags by name
 // alone and attach another site's tag row to this site's post.
 func (s *PostStore) resolveTags(names []string) ([]dbTag, error) {
+	return s.resolveTagsOn(s.db, names)
+}
+
+// resolveTagsOn is resolveTags through db, which may be a transaction.
+func (s *PostStore) resolveTagsOn(db *gorm.DB, names []string) ([]dbTag, error) {
 	var tags []dbTag
 	for _, name := range names {
 		name = strings.TrimSpace(name)
@@ -285,7 +333,7 @@ func (s *PostStore) resolveTags(names []string) ([]dbTag, error) {
 			continue
 		}
 		var t dbTag
-		err := s.db.Where("site_id = ? AND name = ?", s.siteID, name).
+		err := db.Where("site_id = ? AND name = ?", s.siteID, name).
 			Attrs(dbTag{SiteID: s.siteID, Name: name}).
 			FirstOrCreate(&t).Error
 		if err != nil {

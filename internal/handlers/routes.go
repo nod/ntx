@@ -36,6 +36,9 @@ func (h *Handler) Mount(r chi.Router) {
 		r.Post("/admin/posts", h.CreatePost)
 		r.Get("/admin/posts/{id}/edit", h.EditPost)
 		r.Post("/admin/posts/{id}", h.UpdatePost)
+		r.Get("/admin/posts/{id}/pending", h.PendingChanges)
+		r.Post("/admin/posts/{id}/pending/publish", h.PublishChanges)
+		r.Post("/admin/posts/{id}/pending/discard", h.DiscardChanges)
 	})
 
 	r.Group(func(r chi.Router) {

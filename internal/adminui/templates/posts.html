@@ -17,6 +17,7 @@
       <a href="/admin/posts/{{.ID}}/edit">{{.Title}}</a>
       <span class="muted">{{.Slug}}</span>
       <span class="badge{{if eq .Status "published"}} ok{{end}}">{{.Status}}</span>
+      {{if .Pending}}<span class="badge warn">pending changes</span>{{if .Review}} <a href="/admin/posts/{{.ID}}/pending">review</a>{{end}}{{end}}
       <span class="muted">{{.Author}}</span>
       <span class="muted">{{.UpdatedAt.Format "2006-01-02"}}</span>
     </li>

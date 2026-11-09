@@ -1,0 +1,38 @@
+{{define "title"}}pending changes{{end}}
+{{define "content"}}
+<section>
+  <div class="row">
+    <h1>pending changes</h1>
+    <a href="/admin/posts/{{.Post.ID}}/edit" class="button">back</a>
+  </div>
+  <p class="muted">By {{.Author}}, saved {{.Pending.UpdatedAt.Format "2006-01-02 15:04"}}.</p>
+  {{if .Notice}}<p class="notice">{{.Notice}}</p>{{end}}
+  {{if .Stale}}<p class="notice warn">This post was edited after these changes were started. Publishing them will overwrite those edits.</p>{{end}}
+  <div class="compare">
+    <div>
+      <h2>current</h2>
+      <h3>{{.Post.Title}}</h3>
+      <p class="muted">tags: {{join .Post.Tags ", "}}</p>
+      <pre class="body">{{.Post.Body}}</pre>
+    </div>
+    <div>
+      <h2>pending</h2>
+      <h3>{{.Pending.Title}}</h3>
+      <p class="muted">tags: {{join .Pending.Tags ", "}}</p>
+      <pre class="body">{{.Pending.Body}}</pre>
+    </div>
+  </div>
+  <div class="actions">
+    <form method="POST" action="/admin/posts/{{.Post.ID}}/pending/publish">
+      <input type="hidden" name="revision" value="{{.Revision}}">
+      {{if .Stale}}<input type="hidden" name="confirm" value="1">
+      <button type="submit" class="primary">publish anyway</button>
+      {{else}}<button type="submit" class="primary">publish changes</button>{{end}}
+    </form>
+    <form method="POST" action="/admin/posts/{{.Post.ID}}/pending/discard">
+      <input type="hidden" name="revision" value="{{.Revision}}">
+      <button type="submit" class="danger" data-confirm="Discard these changes?">discard</button>
+    </form>
+  </div>
+</section>
+{{end}}

@@ -5,21 +5,27 @@
     <h1>{{if and .Post .Post.ID}}edit post{{else}}new post{{end}}</h1>
     <a href="/admin/posts" class="button">back</a>
   </div>
-  {{if .ReadOnly}}
-  <p class="hint warn">This post has been published, so your changes would need a site admin's review. Editing published posts isn't available to you yet.</p>
+  {{if eq .Mode "pending"}}
+  <p class="notice">Your changes will be reviewed before they go live.</p>
+  {{else if .Pending}}
+  {{if .ReviewLink}}
+  <p class="notice">This post has pending changes. <a href="/admin/posts/{{.Post.ID}}/pending">review them</a></p>
+  {{else}}
+  <p class="notice">Your earlier changes are waiting for a site admin.</p>
+  {{end}}
   {{end}}
   {{/* A post that failed to save before it was ever created comes back
        with ID 0: it is still a new post. */}}
   <form method="POST" action="{{if and .Post .Post.ID}}/admin/posts/{{.Post.ID}}{{else}}/admin/posts{{end}}" class="stack">
+    {{if .Base}}<input type="hidden" name="base" value="{{.Base}}">{{end}}
     <label for="title">title</label>
-    <input type="text" id="title" name="title" value="{{with .Post}}{{.Title}}{{end}}" data-slug-source="slug" required{{if .ReadOnly}} readonly{{end}}>
+    <input type="text" id="title" name="title" value="{{with .Post}}{{.Title}}{{end}}"{{if ne .Mode "pending"}} data-slug-source="slug"{{end}} required>
     <label for="slug">slug</label>
-    <input type="text" id="slug" name="slug" value="{{with .Post}}{{.Slug}}{{end}}" required{{if .ReadOnly}} readonly{{end}}>
+    <input type="text" id="slug" name="slug" value="{{with .Post}}{{.Slug}}{{end}}" required{{if eq .Mode "pending"}} readonly{{end}}>
     <label for="tags">tags (comma-separated)</label>
-    <input type="text" id="tags" name="tags" value="{{with .Post}}{{join .Tags ", "}}{{end}}"{{if .ReadOnly}} readonly{{end}}>
+    <input type="text" id="tags" name="tags" value="{{with .Post}}{{join .Tags ", "}}{{end}}">
     <label for="body">body (markdown)</label>
-    <textarea id="body" name="body" rows="24"{{if .ReadOnly}} readonly{{end}}>{{with .Post}}{{.Body}}{{end}}</textarea>
-    {{if not .ReadOnly}}
+    <textarea id="body" name="body" rows="24">{{with .Post}}{{.Body}}{{end}}</textarea>
     <div class="actions">
       <button type="submit" name="action" value="save">save</button>
       {{if .CanPublish}}
@@ -30,7 +36,6 @@
       <button type="submit" name="action" value="delete" class="danger" data-confirm="Delete this post?">delete</button>
       {{end}}
     </div>
-    {{end}}
   </form>
 </section>
 {{end}}

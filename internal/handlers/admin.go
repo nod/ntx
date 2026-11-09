@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -77,6 +79,9 @@ type postRow struct {
 	models.Post
 	Status string // draft, published or unpublished
 	Author string
+	// Pending: the post has changes waiting for a site admin; Review:
+	// this actor can publish or discard them.
+	Pending, Review bool
 }
 
 func postStatus(p *models.Post) string {
@@ -118,19 +123,17 @@ func (h *Handler) Posts(w http.ResponseWriter, r *http.Request) {
 			h.serverError(w, err)
 			return
 		}
+		pending, err := ps.PendingIDs()
+		if err != nil {
+			h.serverError(w, err)
+			return
+		}
 		rows := make([]postRow, len(posts))
 		for i, p := range posts {
-			rows[i] = postRow{Post: p, Status: postStatus(&p), Author: "former member"}
+			rows[i] = postRow{Post: p, Status: postStatus(&p), Author: "former member", Pending: pending[p.ID]}
+			rows[i].Review = rows[i].Pending && authz.CanReviewChanges(a, &p)
 			if p.AuthorID != nil {
-				if u := authors[*p.AuthorID]; u != nil {
-					rows[i].Author = u.Email
-					if u.Name != "" {
-						rows[i].Author = u.Name
-					}
-					if u.Email == "" && u.Name == "" {
-						rows[i].Author = "root"
-					}
-				}
+				rows[i].Author = authorLabel(authors[*p.AuthorID])
 			}
 		}
 		data := map[string]any{"Posts": rows, "ShowStats": admin}
@@ -147,14 +150,37 @@ func (h *Handler) Posts(w http.ResponseWriter, r *http.Request) {
 }
 
 // editor renders the post editor, offering only the actions the actor is
-// allowed. A post with ID 0 is new.
-func (h *Handler) editor(w http.ResponseWriter, r *http.Request, post *models.Post, errMsg string) {
+// allowed. A post with ID 0 is new. Mode "pending" is a contributor's own
+// live-once post without can_publish: the form shows their pending
+// changes (if any), the slug is fixed, and Save stores a revision.
+func (h *Handler) editor(w http.ResponseWriter, r *http.Request, site *models.Site, post *models.Post, errMsg string) {
 	a := auth.ActorFrom(r)
-	data := map[string]any{"Post": post, "Error": errMsg}
+	data := map[string]any{"Post": post, "Error": errMsg, "Mode": "direct"}
 	if post == nil || post.ID == 0 {
-		data["CanPublish"], data["CanDelete"], data["ReadOnly"] = authz.CanPublishOwn(a), false, false
+		data["CanPublish"], data["CanDelete"] = authz.CanPublishOwn(a), false
+		h.admin(w, r, "editor", data)
+		return
+	}
+	rev, err := h.posts(site).GetPending(post.ID)
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
+	data["Pending"] = rev
+	// Base is the post as this editor shows it. A save that turns into
+	// pending changes -- including a draft published while it was open --
+	// compares against it to warn the reviewer.
+	data["Base"] = post.UpdatedAt.Format(time.RFC3339Nano)
+	if authz.SavesAsPending(a, post) {
+		data["Mode"] = "pending"
+		if rev != nil {
+			shown := *post
+			shown.Title, shown.Body, shown.Tags = rev.Title, rev.Body, rev.Tags
+			data["Post"] = &shown
+		}
 	} else {
-		data["CanPublish"], data["CanDelete"], data["ReadOnly"] = authz.CanPublishPost(a, post), authz.CanDeletePost(a, post), !authz.CanEditPost(a, post)
+		data["CanPublish"], data["CanDelete"] = authz.CanPublishPost(a, post), authz.CanDeletePost(a, post)
+		data["ReviewLink"] = authz.CanReviewChanges(a, post)
 	}
 	h.admin(w, r, "editor", data)
 }
@@ -165,7 +191,7 @@ func (h *Handler) forbidden(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) NewPost(w http.ResponseWriter, r *http.Request) {
 	h.serve(w, r, func(w http.ResponseWriter, r *http.Request, site *models.Site) {
-		h.editor(w, r, nil, "")
+		h.editor(w, r, site, nil, "")
 	})
 }
 
@@ -181,7 +207,7 @@ func (h *Handler) CreatePost(w http.ResponseWriter, r *http.Request) {
 		post.AuthorID = &a.User.ID
 		if err := h.posts(site).Create(post); err != nil {
 			post.ID = 0
-			h.editor(w, r, post, err.Error())
+			h.editor(w, r, site, post, err.Error())
 			return
 		}
 		http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
@@ -194,7 +220,12 @@ func (h *Handler) EditPost(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
-		h.editor(w, r, post, "")
+		a := auth.ActorFrom(r)
+		if !authz.CanEditPost(a, post) && !authz.SavesAsPending(a, post) {
+			h.forbidden(w, r)
+			return
+		}
+		h.editor(w, r, site, post, "")
 	})
 }
 
@@ -221,13 +252,24 @@ func (h *Handler) UpdatePost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		updated := postFromForm(r)
+		updated.ID = existing.ID
+		if authz.SavesAsPending(a, existing) {
+			// The edit waits for a site admin; the post is not touched.
+			if action != "save" {
+				h.forbidden(w, r)
+				return
+			}
+			h.savePending(w, r, ps, existing.ID, updated)
+			return
+		}
+
 		// Every other action saves the form's content too.
 		if !authz.CanEditPost(a, existing) {
 			h.forbidden(w, r)
 			return
 		}
-		updated := postFromForm(r)
-		updated.ID = existing.ID
+		var err error
 		switch action {
 		case "publish", "unpublish":
 			if !authz.CanPublishPost(a, existing) {
@@ -235,16 +277,44 @@ func (h *Handler) UpdatePost(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			updated.Published = action == "publish"
-		default: // "save" keeps the current state
+			err = ps.Update(updated)
+		default: // "save" changes content only, never the published state
+			if authz.CanPublishOwn(a) {
+				err = ps.UpdateContent(updated)
+			} else {
+				// Someone who may only edit drafts: if the post was
+				// published since it was read, the edit waits for review.
+				err = ps.UpdateDraft(updated)
+				if errors.Is(err, models.ErrLiveOnce) {
+					h.savePending(w, r, ps, existing.ID, updated)
+					return
+				}
+			}
 			updated.Published = existing.Published
 		}
-		if err := ps.Update(updated); err != nil {
-			updated.AuthorID, updated.FirstPublishedAt = existing.AuthorID, existing.FirstPublishedAt
-			h.editor(w, r, updated, err.Error())
+		if err != nil {
+			updated.AuthorID, updated.FirstPublishedAt, updated.UpdatedAt = existing.AuthorID, existing.FirstPublishedAt, existing.UpdatedAt
+			h.editor(w, r, site, updated, err.Error())
 			return
 		}
 		http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
 	})
+}
+
+// savePending stores the form's edit as postID's pending changes and
+// returns to the posts list.
+func (h *Handler) savePending(w http.ResponseWriter, r *http.Request, ps *models.PostStore, postID int64, edit *models.Post) {
+	// Without the base the editor sent, there's no telling what the
+	// contributor saw: the zero time marks the revision stale.
+	base, err := time.Parse(time.RFC3339Nano, r.FormValue("base"))
+	if err != nil {
+		base = time.Time{}
+	}
+	if _, err := ps.SavePending(postID, auth.ActorFrom(r).User.ID, edit.Title, edit.Body, edit.Tags, base); err != nil {
+		h.serverError(w, err)
+		return
+	}
+	http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
 }
 
 // postFromParam loads the {id} post from site, writing a 404 or 500 and

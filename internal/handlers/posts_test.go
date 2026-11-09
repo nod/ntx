@@ -2,7 +2,11 @@ package handlers
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -64,30 +68,190 @@ func TestContributorNoPublishCannotPublish(t *testing.T) {
 	}
 }
 
-func TestContributorNoPublishLiveOnceReadOnly(t *testing.T) {
+var baseRe = regexp.MustCompile(`name="base" value="([^"]*)"`)
+
+// editorBase returns the hidden base timestamp from an editor page.
+func editorBase(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	m := baseRe.FindStringSubmatch(text(rec))
+	if m == nil {
+		t.Fatalf("editor has no base field: %s", rec.Body.String())
+	}
+	return m[1]
+}
+
+// publicPages fetches the reader-facing pages a pending edit must not change.
+func (e *env) publicPages(slug, tag string) []string {
+	var out []string
+	for _, path := range []string{"/", "/blog", "/blog/" + slug, "/blog?tag=" + tag} {
+		rec := e.do(http.MethodGet, hostA, path, nil, nil)
+		out = append(out, strconv.Itoa(rec.Code)+" "+rec.Body.String())
+	}
+	return out
+}
+
+func TestContributorNoPublishSavesPendingChanges(t *testing.T) {
 	e := newEnv(t)
 	me := e.member("me@x.io", models.RoleContributor, false)
 	p := e.authored(me, "live", true)
 	c := e.sessionFor(me)
-	page := e.do(http.MethodGet, hostA, "/admin/posts/"+itoa(p.ID)+"/edit", nil, c).Body.String()
-	if !strings.Contains(page, "readonly") {
-		t.Fatal("live-once post's editor isn't read-only for a contributor without can_publish")
+	before := e.publicPages("live", "fresh")
+	edit := e.do(http.MethodGet, hostA, "/admin/posts/"+itoa(p.ID)+"/edit", nil, c)
+	page := text(edit)
+	if edit.Code != http.StatusOK || !strings.Contains(page, "Your changes will be reviewed before they go live.") {
+		t.Fatalf("pending editor: %d %s", edit.Code, page)
 	}
-	for _, action := range []string{`value="publish"`, `value="unpublish"`, `value="delete"`, `value="save"`} {
+	if !regexp.MustCompile(`id="slug"[^>]*readonly`).MatchString(page) {
+		t.Fatal("slug isn't read-only in the pending editor")
+	}
+	if !strings.Contains(page, `value="save"`) {
+		t.Fatal("pending editor has no save button")
+	}
+	for _, action := range []string{`value="publish"`, `value="unpublish"`, `value="delete"`} {
 		if strings.Contains(page, action) {
-			t.Errorf("read-only editor offers %s", action)
+			t.Errorf("pending editor offers %s", action)
 		}
 	}
-	if rec := e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(p.ID), postForm("Defaced", "live", "save"), c); rec.Code != http.StatusForbidden {
-		t.Fatalf("saving a live-once post: %d", rec.Code)
+	f := postForm("Reworded", "live", "save")
+	f.Set("tags", "fresh")
+	f.Set("base", editorBase(t, edit))
+	if rec := e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(p.ID), f, c); rec.Code != http.StatusSeeOther {
+		t.Fatalf("pending save: %d %s", rec.Code, rec.Body.String())
 	}
-	for _, action := range []string{"unpublish", "delete"} {
-		if rec := e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(p.ID), postForm("Title live", "live", action), c); rec.Code != http.StatusForbidden {
+	ps := e.posts.ForSite(e.siteA.ID)
+	post, _ := ps.GetByID(p.ID)
+	if post.Title != "Title live" {
+		t.Fatalf("the post changed: %+v", post)
+	}
+	rev, err := ps.GetPending(p.ID)
+	if err != nil || rev == nil || rev.Title != "Reworded" || !reflect.DeepEqual(rev.Tags, []string{"fresh"}) {
+		t.Fatalf("revision = %+v, %v", rev, err)
+	}
+	if rev.Stale(post) {
+		t.Fatal("an untouched post reads as stale after the base went through the form")
+	}
+	if after := e.publicPages("live", "fresh"); !reflect.DeepEqual(after, before) {
+		t.Fatalf("public pages changed:\nbefore %q\nafter  %q", before, after)
+	}
+	if page := text(e.do(http.MethodGet, hostA, "/admin/posts/"+itoa(p.ID)+"/edit", nil, c)); !strings.Contains(page, "Reworded") {
+		t.Fatal("editor doesn't show the pending changes")
+	}
+	f.Set("title", "Reworded twice")
+	if rec := e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(p.ID), f, c); rec.Code != http.StatusSeeOther {
+		t.Fatalf("second pending save: %d", rec.Code)
+	}
+	if again, _ := ps.GetPending(p.ID); again == nil || again.ID != rev.ID || again.Title != "Reworded twice" {
+		t.Fatalf("second save: %+v", again)
+	}
+}
+
+func TestPendingSaveIgnoresForgedFields(t *testing.T) {
+	e := newEnv(t)
+	me := e.member("me@x.io", models.RoleContributor, false)
+	p := e.authored(me, "live", true)
+	c := e.sessionFor(me)
+	ps := e.posts.ForSite(e.siteA.ID)
+	if rec := e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(p.ID), postForm("Moved", "moved", "save"), c); rec.Code != http.StatusSeeOther {
+		t.Fatalf("pending save with a new slug: %d", rec.Code)
+	}
+	if moved, _ := ps.GetBySlug("moved"); moved != nil {
+		t.Fatal("a pending save changed the slug")
+	}
+	for _, action := range []string{"publish", "unpublish", "delete"} {
+		if rec := e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(p.ID), postForm("Defaced", "live", action), c); rec.Code != http.StatusForbidden {
 			t.Fatalf("%s on a live-once post: %d", action, rec.Code)
 		}
 	}
-	if body := e.do(http.MethodGet, hostA, "/blog/live", nil, nil).Body.String(); !strings.Contains(body, "Title live") || strings.Contains(body, "Defaced") {
+	post, _ := ps.GetByID(p.ID)
+	if post == nil || post.Title != "Title live" || post.Slug != "live" || !post.Published {
+		t.Fatalf("post after forged actions: %+v", post)
+	}
+	if body := e.do(http.MethodGet, hostA, "/blog/live", nil, nil).Body.String(); !strings.Contains(body, "Title live") || strings.Contains(body, "Defaced") || strings.Contains(body, "Moved") {
 		t.Fatalf("public page changed: %s", body)
+	}
+}
+
+func TestDraftPublishedWhileContributorEdits(t *testing.T) {
+	e := newEnv(t)
+	me := e.member("me@x.io", models.RoleContributor, false)
+	d := e.authored(me, "d", false)
+	ps := e.posts.ForSite(e.siteA.ID)
+	c := e.sessionFor(me)
+	// The contributor opens the draft in the real editor form.
+	edit := e.do(http.MethodGet, hostA, "/admin/posts/"+itoa(d.ID)+"/edit", nil, c)
+	if edit.Code != http.StatusOK {
+		t.Fatalf("draft editor: %d", edit.Code)
+	}
+	base := editorBase(t, edit)
+	if rec := e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(d.ID), postForm("Fixed by admin", "d", "publish"), e.siteAdminCookie()); rec.Code != http.StatusSeeOther {
+		t.Fatalf("admin publish: %d", rec.Code)
+	}
+	f := postForm("Late edit", "d", "save")
+	f.Set("base", base)
+	if rec := e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(d.ID), f, c); rec.Code != http.StatusSeeOther {
+		t.Fatalf("late save: %d %s", rec.Code, rec.Body.String())
+	}
+	post, _ := ps.GetByID(d.ID)
+	if !post.Published || post.Title != "Fixed by admin" {
+		t.Fatalf("the late save changed the live post: %+v", post)
+	}
+	rev, _ := ps.GetPending(d.ID)
+	if rev == nil || rev.Title != "Late edit" || !rev.Stale(post) {
+		t.Fatalf("late save should be a stale revision: %+v", rev)
+	}
+}
+
+func TestEditorPendingNotices(t *testing.T) {
+	e := newEnv(t)
+	me := e.member("me@x.io", models.RoleContributor, false)
+	p := e.authored(me, "live", true)
+	p, _ = e.posts.ForSite(e.siteA.ID).GetByID(p.ID)
+	if _, err := e.posts.ForSite(e.siteA.ID).SavePending(p.ID, me.ID, "Pending", "b", nil, p.UpdatedAt); err != nil {
+		t.Fatal(err)
+	}
+	editPath := "/admin/posts/" + itoa(p.ID) + "/edit"
+	admin := text(e.do(http.MethodGet, hostA, editPath, nil, e.siteAdminCookie()))
+	if !strings.Contains(admin, "This post has pending changes.") || !strings.Contains(admin, "/admin/posts/"+itoa(p.ID)+"/pending") {
+		t.Fatalf("admin's editor lacks the pending notice: %s", admin)
+	}
+	if strings.Contains(admin, `value="Pending"`) {
+		t.Fatal("admin's editor shows the pending text instead of the post")
+	}
+	if err := e.mems.Update(me.ID, e.siteA.ID, models.RoleContributor, true); err != nil {
+		t.Fatal(err)
+	}
+	mine := text(e.do(http.MethodGet, hostA, editPath, nil, e.sessionFor(me)))
+	if !strings.Contains(mine, "Your earlier changes are waiting for a site admin.") || strings.Contains(mine, "/pending") {
+		t.Fatalf("publishing contributor's editor: %s", mine)
+	}
+}
+
+// A pending save with no base (an old or hand-made form) can't prove the
+// contributor saw the current post, so it must read as stale.
+func TestPendingSaveWithoutBaseIsStale(t *testing.T) {
+	e := newEnv(t)
+	me := e.member("me@x.io", models.RoleContributor, false)
+	p := e.authored(me, "live", true)
+	if rec := e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(p.ID), postForm("No base", "live", "save"), e.sessionFor(me)); rec.Code != http.StatusSeeOther {
+		t.Fatalf("save: %d", rec.Code)
+	}
+	ps := e.posts.ForSite(e.siteA.ID)
+	post, _ := ps.GetByID(p.ID)
+	if rev, _ := ps.GetPending(p.ID); rev == nil || !rev.Stale(post) {
+		t.Fatalf("a revision saved without a base should be stale: %+v", rev)
+	}
+}
+
+func TestSaveKeepsPublishedState(t *testing.T) {
+	e := newEnv(t)
+	me := e.member("me@x.io", models.RoleContributor, true)
+	p := e.authored(me, "live", true)
+	if rec := e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(p.ID), postForm("New title", "live", "save"), e.sessionFor(me)); rec.Code != http.StatusSeeOther {
+		t.Fatalf("save: %d", rec.Code)
+	}
+	post, _ := e.posts.ForSite(e.siteA.ID).GetByID(p.ID)
+	if !post.Published || post.Title != "New title" {
+		t.Fatalf("after save: %+v", post)
 	}
 }
 
