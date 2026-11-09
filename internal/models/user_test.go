@@ -20,7 +20,7 @@ func TestEnsureRootIdempotent(t *testing.T) {
 		t.Errorf("root must have is_root and no email, got %+v", first)
 	}
 	var nullEmail int64
-	if err := d.Raw("SELECT COUNT(*) FROM users WHERE is_root = 1 AND email IS NULL").Scan(&nullEmail).Error; err != nil {
+	if err := d.Raw("SELECT COUNT(*) FROM users WHERE is_root AND email IS NULL").Scan(&nullEmail).Error; err != nil {
 		t.Fatal(err)
 	}
 	if nullEmail != 1 {

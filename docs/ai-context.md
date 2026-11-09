@@ -26,6 +26,7 @@ internal/
   config/config.go             # server-only Config; rejects legacy [[site]]-era keys
   db/db.go                     # SQLite/Postgres open, goose migrations, legacy-schema refusal
   db/migrations/{sqlite,postgres}/100_initial.sql   # the whole schema
+  db/dbtest/dbtest.go          # tests' database: in-memory SQLite, or a fresh Postgres schema
   models/site.go               # SiteStore: sites + sections CRUD with validation; ValidationError
   models/user.go               # UserStore: root bootstrap, people by email, edits (root-guarded)
   models/membership.go         # MembershipStore: role + can_publish per (user, site)
@@ -187,6 +188,7 @@ Don't add a route for content that fits sections; define a section in the site's
 - **No path from the browser.** Theme names, site keys, and section and page slugs are validated (`internal/validate`) before they touch the filesystem.
 - **Markdown safety.** Post bodies render through goldmark, which drops raw HTML by default. Don't enable unsafe rendering.
 - **Single instance.** The registry and the limiter are in memory. Running several processes against one database isn't supported.
+- **Both databases.** Tests open their database with `dbtest.Open(t)`, never `db.Open` directly. With `NTX_TEST_POSTGRES_DSN` set (any database on a Postgres server), each test gets its own schema there; CI runs the suite on SQLite and again on Postgres. Raw SQL in tests and code must work on both: `TRUE`/`FALSE`, not `1`/`0`.
 
 ## Dependencies worth knowing
 

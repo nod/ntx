@@ -21,13 +21,7 @@ type peopleFixture struct {
 
 func newPeople(t *testing.T) *peopleFixture {
 	t.Helper()
-	return newPeopleOn(t, newTestSiteDB(t))
-}
-
-// newPeopleOn builds the fixture on an already-open database, so the same
-// tests can run against Postgres (see revision_pg_test.go).
-func newPeopleOn(t *testing.T, d *gorm.DB) *peopleFixture {
-	t.Helper()
+	d := newTestSiteDB(t)
 	f := &peopleFixture{
 		db: d, sites: NewSiteStore(d), users: NewUserStore(d),
 		mems: NewMembershipStore(d), ids: NewIdentityStore(d), sess: NewSessionStore(d),
@@ -175,7 +169,7 @@ func TestDeleteUserKeepsPosts(t *testing.T) {
 	}
 	now := time.Now()
 	if err := f.db.Exec(`INSERT INTO posts (site_id, author_id, slug, title, body, published, created_at, updated_at)
-		VALUES (?, ?, 'kept', 'Kept', 'body', 1, ?, ?)`, f.a.ID, u.ID, now, now).Error; err != nil {
+		VALUES (?, ?, 'kept', 'Kept', 'body', TRUE, ?, ?)`, f.a.ID, u.ID, now, now).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := f.users.Delete(u.ID); err != nil {

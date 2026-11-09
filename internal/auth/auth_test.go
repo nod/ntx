@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/nod/ntx/internal/db"
+	"github.com/nod/ntx/internal/db/dbtest"
 	"github.com/nod/ntx/internal/models"
 )
 
@@ -33,11 +33,7 @@ type env struct {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
-	d, err := db.Open("sqlite://:memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { s, _ := d.DB(); s.Close() })
+	d := dbtest.Open(t)
 	users := models.NewUserStore(d)
 	root, err := users.EnsureRoot()
 	if err != nil {

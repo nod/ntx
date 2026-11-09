@@ -111,7 +111,10 @@ func openPostgres(dsn string) (*gorm.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := refuseLegacy(sqlDB, "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'goose_db_version'"); err != nil {
+	// Only the schema ntx migrates (the first on search_path, where goose
+	// creates its table) counts; a goose table elsewhere on the server is
+	// another application's.
+	if err := refuseLegacy(sqlDB, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'goose_db_version'"); err != nil {
 		sqlDB.Close()
 		return nil, err
 	}

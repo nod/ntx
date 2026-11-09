@@ -27,7 +27,7 @@ A tag with a suffix (`v1.2.3-rc1`) is published as a **pre-release**: it is not 
 
 | Job | What it does |
 |---|---|
-| `test` | `go vet` and `go test` |
+| `test` | `go vet`, then `go test` on SQLite and again on Postgres (a `postgres:17` service) |
 | `release` | Builds the four binaries, checks `ntx version` prints the tag's version, and creates the GitHub release with auto-generated notes |
 | `formula` | Regenerates `Formula/ntx.rb` with the new version and checksums (`scripts/gen-formula.sh`) and commits it to `main` as `github-actions[bot]` |
 

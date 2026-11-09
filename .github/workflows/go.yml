@@ -10,6 +10,18 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: ntx
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4.3.1
 
@@ -18,7 +30,16 @@ jobs:
           go-version-file: go.mod
 
       - run: go vet ./...
-      - run: go test ./...
+
+      - name: Test on SQLite
+        run: go test ./...
+
+      # Same suite again: every test that opens a database gets its own
+      # schema on this server (internal/db/dbtest).
+      - name: Test on Postgres
+        run: go test -count=1 ./...
+        env:
+          NTX_TEST_POSTGRES_DSN: postgres://postgres:ntx@localhost:5432/postgres?sslmode=disable
 
   # On a v* tag: build linux/darwin x amd64/arm64, publish them with a
   # checksums.txt as a GitHub release. Names (ntx-<os>-<arch>) are what
