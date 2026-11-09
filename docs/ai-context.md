@@ -34,6 +34,7 @@ internal/
   models/invite.go             # InviteStore: hashed tokens, transactional Accept
   models/session.go            # SessionStore: DB-backed sessions (token hash, host-bound)
   models/post.go               # PostStore: site-scoped posts and tags (ForSite), authors
+  models/unique.go             # isDuplicate, retryOnDuplicate: unique-value races become form errors
   models/revision.go           # PostStore pending revisions: save, publish (stale check), discard
   secretbox/secretbox.go       # AES-256-GCM for provider client secrets
   sso/                         # OIDC client (go-oidc), signed ntx_oauth flow state; ssotest = fake provider
@@ -188,6 +189,7 @@ Don't add a route for content that fits sections; define a section in the site's
 - **No path from the browser.** Theme names, site keys, and section and page slugs are validated (`internal/validate`) before they touch the filesystem.
 - **Markdown safety.** Post bodies render through goldmark, which drops raw HTML by default. Don't enable unsafe rendering.
 - **Single instance.** The registry and the limiter are in memory. Running several processes against one database isn't supported.
+- **Unique fields.** A write to a unique value (email, membership, identity, site key and hostname, invite, tag) runs its pre-check and the write inside `retryOnDuplicate`: if another request took the value after the check, the write is retried once in a fresh savepoint, and the check then returns its usual form error (or finds the row). Post slugs have no pre-check; `slugTaken` turns the unique index's error into a form error. Never let a unique-constraint error reach a handler as a 500.
 - **Both databases.** Tests open their database with `dbtest.Open(t)`, never `db.Open` directly. With `NTX_TEST_POSTGRES_DSN` set (any database on a Postgres server), each test gets its own schema there; CI runs the suite on SQLite and again on Postgres. Raw SQL in tests and code must work on both: `TRUE`/`FALSE`, not `1`/`0`.
 
 ## Dependencies worth knowing

@@ -150,8 +150,9 @@ func (s *SiteStore) List() ([]Site, error) {
 
 // normalize lowercases the hostname, fills defaults, and validates the
 // fields every site write shares. excludeID is the site being updated (0
-// on create), so a site doesn't conflict with itself.
-func (s *SiteStore) normalize(site *Site, platformHostname string, excludeID int64) error {
+// on create), so a site doesn't conflict with itself; d is the database or
+// transaction to check against.
+func normalizeSite(d *gorm.DB, site *Site, platformHostname string, excludeID int64) error {
 	site.Hostname = strings.ToLower(strings.TrimSpace(site.Hostname))
 	site.Name = strings.TrimSpace(site.Name)
 	if site.Name == "" {
@@ -171,7 +172,7 @@ func (s *SiteStore) normalize(site *Site, platformHostname string, excludeID int
 		return invalid("theme: %s", err)
 	}
 	var n int64
-	if err := s.db.Model(&dbSite{}).Where("hostname = ? AND id <> ?", site.Hostname, excludeID).Count(&n).Error; err != nil {
+	if err := d.Model(&dbSite{}).Where("hostname = ? AND id <> ?", site.Hostname, excludeID).Count(&n).Error; err != nil {
 		return err
 	}
 	if n > 0 {
@@ -186,21 +187,25 @@ func (s *SiteStore) Create(site *Site, platformHostname string) error {
 	if err := validate.Key(site.Key); err != nil {
 		return invalid("key: %s", err)
 	}
-	var n int64
-	if err := s.db.Model(&dbSite{}).Where("key = ?", site.Key).Count(&n).Error; err != nil {
-		return err
-	}
-	if n > 0 {
-		return invalid("a site with key %q already exists", site.Key)
-	}
-	if err := s.normalize(site, platformHostname, 0); err != nil {
-		return err
-	}
-	r := dbSite{
-		Key: site.Key, Hostname: site.Hostname, Name: site.Name, Description: site.Description,
-		AboutSlug: site.AboutSlug, Theme: site.Theme,
-	}
-	if err := s.db.Create(&r).Error; err != nil {
+	var r dbSite
+	err := retryOnDuplicate(s.db, func(tx *gorm.DB) error {
+		var n int64
+		if err := tx.Model(&dbSite{}).Where("key = ?", site.Key).Count(&n).Error; err != nil {
+			return err
+		}
+		if n > 0 {
+			return invalid("a site with key %q already exists", site.Key)
+		}
+		if err := normalizeSite(tx, site, platformHostname, 0); err != nil {
+			return err
+		}
+		r = dbSite{
+			Key: site.Key, Hostname: site.Hostname, Name: site.Name, Description: site.Description,
+			AboutSlug: site.AboutSlug, Theme: site.Theme,
+		}
+		return tx.Create(&r).Error
+	})
+	if err != nil {
 		return err
 	}
 	site.ID = int64(r.ID)
@@ -220,13 +225,13 @@ func (s *SiteStore) Update(site *Site, platformHostname string) error {
 		return err
 	}
 	site.Key = cur.Key
-	if err := s.normalize(site, platformHostname, site.ID); err != nil {
-		return err
-	}
 	// Read before Updates: GORM writes the new values back into cur.
-	hostnameChanged := cur.Hostname != site.Hostname
-	return s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&cur).Updates(map[string]any{
+	oldHostname := cur.Hostname
+	return retryOnDuplicate(s.db, func(tx *gorm.DB) error {
+		if err := normalizeSite(tx, site, platformHostname, site.ID); err != nil {
+			return err
+		}
+		if err := tx.Model(&dbSite{ID: cur.ID}).Updates(map[string]any{
 			"hostname":    site.Hostname,
 			"name":        site.Name,
 			"description": site.Description,
@@ -236,7 +241,7 @@ func (s *SiteStore) Update(site *Site, platformHostname string) error {
 		}).Error; err != nil {
 			return err
 		}
-		if hostnameChanged {
+		if site.Hostname != oldHostname {
 			return tx.Exec("DELETE FROM sessions WHERE site_id = ?", site.ID).Error
 		}
 		return nil

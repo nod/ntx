@@ -102,7 +102,8 @@ func (s *InviteStore) Create(siteID int64, email, role string, canPublish bool, 
 	if createdBy != 0 {
 		r.CreatedBy = &createdBy
 	}
-	err = s.db.Transaction(func(tx *gorm.DB) error {
+	// A double-submitted invite: the retry replaces the other request's.
+	err = retryOnDuplicate(s.db, func(tx *gorm.DB) error {
 		var n int64
 		if err := tx.Table("memberships").
 			Joins("JOIN users ON users.id = memberships.user_id").

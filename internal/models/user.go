@@ -120,8 +120,12 @@ func findOrCreateByEmail(tx *gorm.DB, email string) (*User, error) {
 	if err := validate.Email(email); err != nil {
 		return nil, invalid("%s", err)
 	}
-	r := dbUser{Email: sql.NullString{String: email, Valid: true}, CreatedAt: time.Now()}
-	if err := tx.Where("email = ?", email).Attrs(r).FirstOrCreate(&r).Error; err != nil {
+	var r dbUser
+	err := retryOnDuplicate(tx, func(tx *gorm.DB) error {
+		r = dbUser{Email: sql.NullString{String: email, Valid: true}, CreatedAt: time.Now()}
+		return tx.Where("email = ?", email).Attrs(r).FirstOrCreate(&r).Error
+	})
+	if err != nil {
 		return nil, err
 	}
 	return toUser(r), nil
@@ -165,14 +169,16 @@ func (s *UserStore) SetEmail(id int64, email string) error {
 	if err := validate.Email(email); err != nil {
 		return invalid("%s", err)
 	}
-	var n int64
-	if err := s.db.Model(&dbUser{}).Where("email = ? AND id <> ?", email, id).Count(&n).Error; err != nil {
-		return err
-	}
-	if n > 0 {
-		return invalid("%s is already used by another person", email)
-	}
-	return s.db.Model(&dbUser{}).Where("id = ?", id).Update("email", email).Error
+	return retryOnDuplicate(s.db, func(tx *gorm.DB) error {
+		var n int64
+		if err := tx.Model(&dbUser{}).Where("email = ? AND id <> ?", email, id).Count(&n).Error; err != nil {
+			return err
+		}
+		if n > 0 {
+			return invalid("%s is already used by another person", email)
+		}
+		return tx.Model(&dbUser{}).Where("id = ?", id).Update("email", email).Error
+	})
 }
 
 func (s *UserStore) SetPlatformAdmin(id int64, on bool) error {
