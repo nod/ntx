@@ -254,7 +254,7 @@ func (s *PostStore) updateContent(p *Post, draftOnly bool) error {
 		}
 		if res.RowsAffected == 0 {
 			if draftOnly {
-				if _, err := s.postInSite(tx, p.ID); err == nil {
+				if _, err := s.lockPostInSite(tx, p.ID); err == nil {
 					return ErrLiveOnce
 				}
 			}

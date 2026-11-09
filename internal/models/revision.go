@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var (
@@ -76,10 +77,15 @@ func toRevision(r dbRevision) (*Revision, error) {
 	}, nil
 }
 
-// postInSite loads postID if it belongs to this store's site.
-func (s *PostStore) postInSite(tx *gorm.DB, postID int64) (*dbPost, error) {
+// lockPostInSite loads postID, if it belongs to this store's site, and
+// locks its row until tx ends. Every write to a post's revision takes this
+// lock first, so saves, publishes and discards of the same post run one at
+// a time, and a direct edit of the post (which updates the row) cannot land
+// between a publish's stale check and its copy. SQLite has no row locks;
+// its single connection already runs transactions one at a time.
+func (s *PostStore) lockPostInSite(tx *gorm.DB, postID int64) (*dbPost, error) {
 	var p dbPost
-	err := tx.Where("site_id = ?", s.siteID).First(&p, postID).Error
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("site_id = ?", s.siteID).First(&p, postID).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, fmt.Errorf("post %d not found in site %d", postID, s.siteID)
 	}
@@ -146,7 +152,7 @@ func (s *PostStore) SavePending(postID, authorID int64, title, body string, tags
 	}
 	var saved dbRevision
 	err = s.db.Transaction(func(tx *gorm.DB) error {
-		p, err := s.postInSite(tx, postID)
+		p, err := s.lockPostInSite(tx, postID)
 		if err != nil {
 			return err
 		}
@@ -189,7 +195,7 @@ func (s *PostStore) SavePending(postID, authorID int64, title, body string, tags
 // Slug and published state are never changed.
 func (s *PostStore) PublishPending(postID int64, seen time.Time, allowStale bool) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		p, err := s.postInSite(tx, postID)
+		p, err := s.lockPostInSite(tx, postID)
 		if err != nil {
 			return err
 		}
@@ -218,15 +224,28 @@ func (s *PostStore) PublishPending(postID int64, seen time.Time, allowStale bool
 		if err := tx.Model(&target).Association("Tags").Replace(tags); err != nil {
 			return err
 		}
-		return tx.Delete(&dbRevision{}, r.ID).Error
+		return deleteVersion(tx, r)
 	})
+}
+
+// deleteVersion deletes r only if it is still the version that was checked,
+// else ErrRevisionChanged (and the caller's transaction rolls back).
+func deleteVersion(tx *gorm.DB, r *dbRevision) error {
+	res := tx.Where("updated_at = ?", r.UpdatedAt).Delete(&dbRevision{}, r.ID)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected != 1 {
+		return ErrRevisionChanged
+	}
+	return nil
 }
 
 // DiscardPending deletes postID's pending changes if they are still the
 // version seen (else ErrRevisionChanged). The post is not touched.
 func (s *PostStore) DiscardPending(postID int64, seen time.Time) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		if _, err := s.postInSite(tx, postID); err != nil {
+		if _, err := s.lockPostInSite(tx, postID); err != nil {
 			return err
 		}
 		r, err := s.pendingOn(tx, postID)
@@ -236,6 +255,6 @@ func (s *PostStore) DiscardPending(postID int64, seen time.Time) error {
 		if r == nil || !r.UpdatedAt.Equal(seen) {
 			return ErrRevisionChanged
 		}
-		return tx.Delete(&dbRevision{}, r.ID).Error
+		return deleteVersion(tx, r)
 	})
 }
