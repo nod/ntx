@@ -64,6 +64,7 @@ func (h *Handler) pendingPage(w http.ResponseWriter, r *http.Request, site *mode
 		"Author":   authorLabel(author),
 		"Stale":    rev.Stale(post),
 		"Revision": rev.UpdatedAt.Format(time.RFC3339Nano),
+		"Version":  post.UpdatedAt.Format(time.RFC3339Nano),
 		"Notice":   notice,
 	})
 }
@@ -114,12 +115,19 @@ func (h *Handler) PublishChanges(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
-		err := h.posts(site).PublishPending(post.ID, seen, r.FormValue("confirm") == "1")
+		// "publish anyway" names the post version it agreed to overwrite;
+		// anything else (absent, unparseable) agrees to nothing.
+		overwrite, _ := time.Parse(time.RFC3339Nano, r.FormValue("confirm"))
+		err := h.posts(site).PublishPending(post.ID, seen, overwrite)
 		switch {
 		case err == nil:
 			http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
 		case errors.Is(err, models.ErrStale):
-			h.pendingPage(w, r, site, http.StatusConflict, post, "")
+			notice := ""
+			if !overwrite.IsZero() {
+				notice = "The post was edited again since you opened this page. Check the current version before publishing."
+			}
+			h.pendingPage(w, r, site, http.StatusConflict, post, notice)
 		case errors.Is(err, models.ErrRevisionChanged):
 			h.reviewConflict(w, r, site, post)
 		default:

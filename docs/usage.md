@@ -130,8 +130,8 @@ by side:
 If someone edited the post directly after the contributor started editing, the
 page warns that publishing will overwrite those edits, and the button becomes
 **publish anyway**. If the contributor saves again while you have the page open,
-publishing stops and shows you the newer version instead, so you never publish
-text you haven't seen.
+or someone edits the post again, publishing stops and shows you the newer
+version instead, so you never publish over, or publish, text you haven't seen.
 
 ### Setting up a site's sign-in provider
 

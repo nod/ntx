@@ -28,7 +28,7 @@ func TestPublishPendingWaitsForDirectEdit(t *testing.T) {
 		p.UpdatedAt.Add(time.Second), p.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	err := whileOpen(t, tx, true, func() error { return ps.PublishPending(p.ID, r.UpdatedAt, false) })
+	err := whileOpen(t, tx, true, func() error { return ps.PublishPending(p.ID, r.UpdatedAt, time.Time{}) })
 	if !errors.Is(err, ErrStale) {
 		t.Fatalf("PublishPending = %v, want ErrStale", err)
 	}
@@ -47,7 +47,7 @@ func TestPublishPendingKeepsConcurrentSave(t *testing.T) {
 		r.UpdatedAt.Add(time.Second), p.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	err := whileOpen(t, tx, true, func() error { return ps.PublishPending(p.ID, r.UpdatedAt, false) })
+	err := whileOpen(t, tx, true, func() error { return ps.PublishPending(p.ID, r.UpdatedAt, time.Time{}) })
 	if !errors.Is(err, ErrRevisionChanged) {
 		t.Fatalf("PublishPending = %v, want ErrRevisionChanged", err)
 	}
