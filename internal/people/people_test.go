@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nod/ntx/internal/db"
+	"github.com/nod/ntx/internal/db/dbtest"
 	"github.com/nod/ntx/internal/models"
 )
 
@@ -22,11 +22,7 @@ type fx struct {
 
 func setup(t *testing.T) *fx {
 	t.Helper()
-	d, err := db.Open("sqlite://:memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { s, _ := d.DB(); s.Close() })
+	d := dbtest.Open(t)
 	f := &fx{users: models.NewUserStore(d), ids: models.NewIdentityStore(d), mems: models.NewMembershipStore(d), inv: models.NewInviteStore(d)}
 	f.svc = New(f.users, f.ids, f.mems, f.inv)
 	if _, err := f.users.EnsureRoot(); err != nil {

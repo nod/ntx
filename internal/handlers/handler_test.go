@@ -13,7 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/nod/ntx/internal/auth"
-	"github.com/nod/ntx/internal/db"
+	"github.com/nod/ntx/internal/db/dbtest"
 	"github.com/nod/ntx/internal/models"
 	"github.com/nod/ntx/internal/people"
 	"github.com/nod/ntx/internal/secretbox"
@@ -74,11 +74,7 @@ type env struct {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
-	d, err := db.Open("sqlite://:memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { s, _ := d.DB(); s.Close() })
+	d := dbtest.Open(t)
 
 	themesRoot := t.TempDir()
 	writeTheme(t, themesRoot, "t1")

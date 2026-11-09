@@ -6,21 +6,14 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/nod/ntx/internal/db"
+	"github.com/nod/ntx/internal/db/dbtest"
 )
 
 const testPlatformHost = "admin.example.com"
 
 func newTestSiteDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	database, err := db.Open("sqlite://:memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		sqlDB, _ := database.DB()
-		sqlDB.Close()
-	})
+	database := dbtest.Open(t)
 	return database
 }
 
@@ -133,7 +126,7 @@ func TestHostnameChangeDeletesSessions(t *testing.T) {
 	d := newTestSiteDB(t)
 	s := NewSiteStore(d)
 	a := mustCreateSite(t, s, "a", "a.example.com")
-	if err := d.Exec("INSERT INTO users (id, name, is_root, is_platform_admin, created_at) VALUES (1, 'root', 1, 0, CURRENT_TIMESTAMP)").Error; err != nil {
+	if err := d.Exec("INSERT INTO users (id, name, is_root, is_platform_admin, created_at) VALUES (1, 'root', TRUE, FALSE, CURRENT_TIMESTAMP)").Error; err != nil {
 		t.Fatal(err)
 	}
 	addSession := func() {

@@ -1,4 +1,4 @@
-package db
+package db_test
 
 import (
 	"database/sql"
@@ -9,20 +9,10 @@ import (
 
 	_ "github.com/glebarez/go-sqlite"
 	"gorm.io/gorm"
-)
 
-func openMem(t *testing.T) *gorm.DB {
-	t.Helper()
-	d, err := Open("sqlite://:memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		s, _ := d.DB()
-		s.Close()
-	})
-	return d
-}
+	"github.com/nod/ntx/internal/db"
+	"github.com/nod/ntx/internal/db/dbtest"
+)
 
 func exec(t *testing.T, d *gorm.DB, q string, args ...any) error {
 	t.Helper()
@@ -39,16 +29,12 @@ func count(t *testing.T, d *gorm.DB, table string) int64 {
 }
 
 func TestFreshSchemaHasAllTables(t *testing.T) {
-	d := openMem(t)
+	d := dbtest.Open(t)
 	for _, table := range []string{
 		"users", "identities", "sites", "memberships", "invites", "sessions",
 		"posts", "post_revisions", "tags", "post_tags", "sections", "section_pages",
 	} {
-		var n int64
-		if err := d.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&n).Error; err != nil {
-			t.Fatal(err)
-		}
-		if n != 1 {
+		if !d.Migrator().HasTable(table) {
 			t.Errorf("table %q missing from the fresh schema", table)
 		}
 	}
@@ -72,13 +58,13 @@ func TestRefusesLegacyDatabase(t *testing.T) {
 	}
 	raw.Close()
 
-	d, err := Open("sqlite://" + path)
+	d, err := db.Open("sqlite://" + path)
 	if err == nil {
 		s, _ := d.DB()
 		s.Close()
 		t.Fatal("expected Open to refuse a pre-100 database")
 	}
-	if !errors.Is(err, ErrLegacySchema) || !strings.Contains(err.Error(), "delete") {
+	if !errors.Is(err, db.ErrLegacySchema) || !strings.Contains(err.Error(), "delete") {
 		t.Errorf("expected ErrLegacySchema telling the operator to delete the database, got: %v", err)
 	}
 }
@@ -86,16 +72,16 @@ func TestRefusesLegacyDatabase(t *testing.T) {
 // Foreign keys must be on for every connection, or deleting a site would
 // leave its posts and sessions behind.
 func TestDeletingSiteCascades(t *testing.T) {
-	d := openMem(t)
+	d := dbtest.Open(t)
 	must := func(q string, args ...any) {
 		t.Helper()
 		if err := exec(t, d, q, args...); err != nil {
 			t.Fatal(err)
 		}
 	}
-	must("INSERT INTO users (id, name, is_root, is_platform_admin, created_at) VALUES (1, 'root', 1, 0, CURRENT_TIMESTAMP)")
+	must("INSERT INTO users (id, name, is_root, is_platform_admin, created_at) VALUES (1, 'root', TRUE, FALSE, CURRENT_TIMESTAMP)")
 	must("INSERT INTO sites (id, key, hostname, name, description, about_slug, theme, created_at, updated_at) VALUES (1, 'a', 'a.example.com', 'A', '', 'about', 'default', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
-	must("INSERT INTO posts (site_id, slug, title, body, published, created_at, updated_at) VALUES (1, 'p', 'P', '.', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+	must("INSERT INTO posts (site_id, slug, title, body, published, created_at, updated_at) VALUES (1, 'p', 'P', '.', FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
 	must("INSERT INTO sessions (token_hash, user_id, site_id, created_at, expires_at, last_seen_at) VALUES ('h', 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
 	must("DELETE FROM sites WHERE id = 1")
 	if n := count(t, d, "posts"); n != 0 {
@@ -107,25 +93,25 @@ func TestDeletingSiteCascades(t *testing.T) {
 }
 
 func TestOnlyOneRootUser(t *testing.T) {
-	d := openMem(t)
-	if err := exec(t, d, "INSERT INTO users (name, is_root, is_platform_admin, created_at) VALUES ('root', 1, 0, CURRENT_TIMESTAMP)"); err != nil {
+	d := dbtest.Open(t)
+	if err := exec(t, d, "INSERT INTO users (name, is_root, is_platform_admin, created_at) VALUES ('root', TRUE, FALSE, CURRENT_TIMESTAMP)"); err != nil {
 		t.Fatal(err)
 	}
-	if err := exec(t, d, "INSERT INTO users (name, is_root, is_platform_admin, created_at) VALUES ('root2', 1, 0, CURRENT_TIMESTAMP)"); err == nil {
+	if err := exec(t, d, "INSERT INTO users (name, is_root, is_platform_admin, created_at) VALUES ('root2', TRUE, FALSE, CURRENT_TIMESTAMP)"); err == nil {
 		t.Error("a second is_root user must be rejected")
 	}
-	if err := exec(t, d, "INSERT INTO users (email, name, is_root, is_platform_admin, created_at) VALUES ('a@x.com', 'a', 0, 0, CURRENT_TIMESTAMP)"); err != nil {
+	if err := exec(t, d, "INSERT INTO users (email, name, is_root, is_platform_admin, created_at) VALUES ('a@x.com', 'a', FALSE, FALSE, CURRENT_TIMESTAMP)"); err != nil {
 		t.Errorf("ordinary users must be allowed: %v", err)
 	}
 }
 
 func TestOnePendingInvitePerSiteEmail(t *testing.T) {
-	d := openMem(t)
+	d := dbtest.Open(t)
 	if err := exec(t, d, "INSERT INTO sites (id, key, hostname, name, description, about_slug, theme, created_at, updated_at) VALUES (1, 'a', 'a.example.com', 'A', '', 'about', 'default', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"); err != nil {
 		t.Fatal(err)
 	}
 	ins := func(hash string, usedAt any) error {
-		return exec(t, d, "INSERT INTO invites (site_id, email, role, can_publish, token_hash, expires_at, used_at, created_at) VALUES (1, 'b@x.com', 'contributor', 0, ?, CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP)", hash, usedAt)
+		return exec(t, d, "INSERT INTO invites (site_id, email, role, can_publish, token_hash, expires_at, used_at, created_at) VALUES (1, 'b@x.com', 'contributor', FALSE, ?, CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP)", hash, usedAt)
 	}
 	if err := ins("t1", nil); err != nil {
 		t.Fatal(err)

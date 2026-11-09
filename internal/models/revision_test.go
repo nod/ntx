@@ -61,11 +61,6 @@ func TestSavePendingRefusesNeverPublished(t *testing.T) {
 
 func TestSavePendingLeavesPostAlone(t *testing.T) {
 	f := newPeople(t)
-	checkSavePendingLeavesPostAlone(t, f)
-}
-
-func checkSavePendingLeavesPostAlone(t *testing.T, f *peopleFixture) {
-	t.Helper()
 	u := f.person(t, "w@x.io")
 	ps := NewPostStore(f.db).ForSite(f.a.ID)
 	p := livePost(t, ps, u, "live", true, "old")
