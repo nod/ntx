@@ -4,47 +4,7 @@ import (
 	"errors"
 	"testing"
 	"time"
-
-	"gorm.io/gorm"
 )
-
-// These tests hold another request's writes open in an uncommitted
-// transaction while a store call runs, then commit or roll them back. On
-// Postgres the call runs alongside the open transaction, as two requests
-// would; on SQLite (one connection) it simply waits for it, so the same
-// expectations hold for both.
-
-// whileOpen starts op, gives it time to run into other's writes, ends
-// other (commit or rollback), and returns op's result.
-func whileOpen(t *testing.T, other *gorm.DB, commit bool, op func() error) error {
-	t.Helper()
-	done := make(chan error, 1)
-	go func() { done <- op() }()
-	time.Sleep(200 * time.Millisecond)
-	end := other.Rollback
-	if commit {
-		end = other.Commit
-	}
-	if err := end().Error; err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case err := <-done:
-		return err
-	case <-time.After(10 * time.Second):
-		t.Fatal("still blocked after the other transaction ended")
-		return nil
-	}
-}
-
-func begin(t *testing.T, f *peopleFixture) *gorm.DB {
-	t.Helper()
-	tx := f.db.Begin()
-	if tx.Error != nil {
-		t.Fatal(tx.Error)
-	}
-	return tx
-}
 
 // pendingFixture: a contributor's live post on site A with pending changes.
 func pendingFixture(t *testing.T) (*peopleFixture, *PostStore, *User, *Post, *Revision) {
@@ -63,7 +23,7 @@ func pendingFixture(t *testing.T) (*peopleFixture, *PostStore, *User, *Post, *Re
 // published must make them stale, not be overwritten.
 func TestPublishPendingWaitsForDirectEdit(t *testing.T) {
 	f, ps, _, p, r := pendingFixture(t)
-	tx := begin(t, f)
+	tx := begin(t, f.db)
 	if err := tx.Exec("UPDATE posts SET title = 'Direct edit', updated_at = ? WHERE id = ?",
 		p.UpdatedAt.Add(time.Second), p.ID).Error; err != nil {
 		t.Fatal(err)
@@ -82,7 +42,7 @@ func TestPublishPendingWaitsForDirectEdit(t *testing.T) {
 // newer save deleted along with the version the admin saw.
 func TestPublishPendingKeepsConcurrentSave(t *testing.T) {
 	f, ps, _, p, r := pendingFixture(t)
-	tx := begin(t, f)
+	tx := begin(t, f.db)
 	if err := tx.Exec("UPDATE post_revisions SET title = 'Newer', updated_at = ? WHERE post_id = ?",
 		r.UpdatedAt.Add(time.Second), p.ID).Error; err != nil {
 		t.Fatal(err)
@@ -101,7 +61,7 @@ func TestPublishPendingKeepsConcurrentSave(t *testing.T) {
 
 func TestDiscardPendingKeepsConcurrentSave(t *testing.T) {
 	f, ps, _, p, r := pendingFixture(t)
-	tx := begin(t, f)
+	tx := begin(t, f.db)
 	if err := tx.Exec("UPDATE post_revisions SET title = 'Newer', updated_at = ? WHERE post_id = ?",
 		r.UpdatedAt.Add(time.Second), p.ID).Error; err != nil {
 		t.Fatal(err)
@@ -119,7 +79,7 @@ func TestDiscardPendingKeepsConcurrentSave(t *testing.T) {
 // version must become new pending changes, not vanish.
 func TestSavePendingDuringPublishIsKept(t *testing.T) {
 	f, ps, u, p, _ := pendingFixture(t)
-	tx := begin(t, f)
+	tx := begin(t, f.db)
 	// What PublishPending writes: the post, then the revision gone.
 	if err := tx.Exec("UPDATE posts SET title = 'Pending', updated_at = ? WHERE id = ?",
 		p.UpdatedAt.Add(time.Second), p.ID).Error; err != nil {
@@ -150,7 +110,7 @@ func TestSimultaneousFirstSaves(t *testing.T) {
 
 	// Another first save, in flight: it is rolled back, leaving the two
 	// below to race for the post's only revision.
-	tx := begin(t, f)
+	tx := begin(t, f.db)
 	now := revisionNow()
 	if err := tx.Create(&dbRevision{PostID: p.ID, Title: "x", Tags: "[]", BaseUpdatedAt: p.UpdatedAt, CreatedAt: now, UpdatedAt: now}).Error; err != nil {
 		t.Fatal(err)

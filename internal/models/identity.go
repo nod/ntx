@@ -66,6 +66,12 @@ func linkIdentityTx(tx *gorm.DB, userID int64, issuer, subject, email string) er
 	if err := guardRoot(tx, userID); err != nil {
 		return err
 	}
+	return retryOnDuplicate(tx, func(tx *gorm.DB) error {
+		return linkIdentity(tx, userID, issuer, subject, email)
+	})
+}
+
+func linkIdentity(tx *gorm.DB, userID int64, issuer, subject, email string) error {
 	var existing dbIdentity
 	err := tx.Where("issuer = ? AND subject = ?", issuer, subject).First(&existing).Error
 	switch {

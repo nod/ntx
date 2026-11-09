@@ -80,14 +80,16 @@ func addMembership(tx *gorm.DB, userID, siteID int64, role string, canPublish bo
 	if err := validRole(role); err != nil {
 		return err
 	}
-	var n int64
-	if err := tx.Model(&dbMembership{}).Where("user_id = ? AND site_id = ?", userID, siteID).Count(&n).Error; err != nil {
-		return err
-	}
-	if n > 0 {
-		return invalid("already a member of this site")
-	}
-	return tx.Create(&dbMembership{UserID: userID, SiteID: siteID, Role: role, CanPublish: canPublish, CreatedAt: time.Now()}).Error
+	return retryOnDuplicate(tx, func(tx *gorm.DB) error {
+		var n int64
+		if err := tx.Model(&dbMembership{}).Where("user_id = ? AND site_id = ?", userID, siteID).Count(&n).Error; err != nil {
+			return err
+		}
+		if n > 0 {
+			return invalid("already a member of this site")
+		}
+		return tx.Create(&dbMembership{UserID: userID, SiteID: siteID, Role: role, CanPublish: canPublish, CreatedAt: time.Now()}).Error
+	})
 }
 
 func (s *MembershipStore) Update(userID, siteID int64, role string, canPublish bool) error {

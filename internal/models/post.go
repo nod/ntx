@@ -181,7 +181,7 @@ func (s *PostStore) Create(p *Post) error {
 		r.FirstPublishedAt = &now
 	}
 	if err := s.db.Create(&r).Error; err != nil {
-		return err
+		return s.slugTaken(err, p.Slug)
 	}
 	p.ID = int64(r.ID)
 	p.FirstPublishedAt = r.FirstPublishedAt
@@ -212,7 +212,7 @@ func (s *PostStore) Update(p *Post) error {
 		}
 		res := tx.Model(&r).Where("site_id = ?", s.siteID).Updates(fields)
 		if res.Error != nil {
-			return res.Error
+			return s.slugTaken(res.Error, p.Slug)
 		}
 		if res.RowsAffected == 0 {
 			return fmt.Errorf("post %d not found in site %d", p.ID, s.siteID)
@@ -250,7 +250,7 @@ func (s *PostStore) updateContent(p *Post, draftOnly bool) error {
 		}
 		res := q.Updates(map[string]any{"slug": p.Slug, "title": p.Title, "body": p.Body})
 		if res.Error != nil {
-			return res.Error
+			return s.slugTaken(res.Error, p.Slug)
 		}
 		if res.RowsAffected == 0 {
 			if draftOnly {
@@ -333,15 +333,28 @@ func (s *PostStore) resolveTagsOn(db *gorm.DB, names []string) ([]dbTag, error) 
 			continue
 		}
 		var t dbTag
-		err := db.Where("site_id = ? AND name = ?", s.siteID, name).
-			Attrs(dbTag{SiteID: s.siteID, Name: name}).
-			FirstOrCreate(&t).Error
+		err := retryOnDuplicate(db, func(tx *gorm.DB) error {
+			t = dbTag{}
+			return tx.Where("site_id = ? AND name = ?", s.siteID, name).
+				Attrs(dbTag{SiteID: s.siteID, Name: name}).
+				FirstOrCreate(&t).Error
+		})
 		if err != nil {
 			return nil, err
 		}
 		tags = append(tags, t)
 	}
 	return tags, nil
+}
+
+// slugTaken turns a unique-constraint failure writing a post row into a
+// form error: (site_id, slug) is the only unique key there, and the index
+// is the only check, so two requests can't both take a slug.
+func (s *PostStore) slugTaken(err error, slug string) error {
+	if isDuplicate(s.db, err) {
+		return invalid("another post on this site already uses the slug %q", slug)
+	}
+	return err
 }
 
 func toPost(r dbPost) Post {
