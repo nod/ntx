@@ -43,7 +43,8 @@ func toMembership(r dbMembership) *Membership {
 	return &Membership{ID: int64(r.ID), UserID: r.UserID, SiteID: r.SiteID, Role: r.Role, CanPublish: r.CanPublish}
 }
 
-func validRole(role string) error {
+// ValidRole rejects anything but admin or contributor.
+func ValidRole(role string) error {
 	if role != RoleAdmin && role != RoleContributor {
 		return invalid("role must be admin or contributor")
 	}
@@ -77,7 +78,7 @@ func addMembership(tx *gorm.DB, userID, siteID int64, role string, canPublish bo
 	if err := guardRoot(tx, userID); err != nil {
 		return err
 	}
-	if err := validRole(role); err != nil {
+	if err := ValidRole(role); err != nil {
 		return err
 	}
 	return retryOnDuplicate(tx, func(tx *gorm.DB) error {
@@ -93,7 +94,7 @@ func addMembership(tx *gorm.DB, userID, siteID int64, role string, canPublish bo
 }
 
 func (s *MembershipStore) Update(userID, siteID int64, role string, canPublish bool) error {
-	if err := validRole(role); err != nil {
+	if err := ValidRole(role); err != nil {
 		return err
 	}
 	res := s.db.Model(&dbMembership{}).Where("user_id = ? AND site_id = ?", userID, siteID).

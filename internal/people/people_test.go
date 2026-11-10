@@ -181,3 +181,15 @@ func TestAddMemberCancelsPendingInvite(t *testing.T) {
 		t.Fatal("adding an existing member succeeded")
 	}
 }
+
+// A bad role is refused before anyone is created, so a forged form value
+// can't leave behind a person who belongs to no site.
+func TestAddMemberBadRoleCreatesNoOne(t *testing.T) {
+	f := setup(t)
+	if _, err := f.svc.AddMember(f.a.ID, "new@x.io", "owner", false); err == nil {
+		t.Fatal(`AddMember accepted role "owner"`)
+	}
+	if u, _ := f.users.FindByEmail("new@x.io"); u != nil {
+		t.Fatalf("a refused add created %+v", u)
+	}
+}

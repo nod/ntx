@@ -102,16 +102,26 @@ func (s *Service) resolve(siteID int64, c models.IdentityClaims, invite string, 
 // AddMember gives the person with this email a membership on the site
 // straight away, creating the user if needed. Any pending invite for them
 // on the site is cancelled: it would only offer what they now have.
+// The role is checked first, so a bad one creates no one.
 func (s *Service) AddMember(siteID int64, email, role string, canPublish bool) (*models.User, error) {
+	if err := models.ValidRole(role); err != nil {
+		return nil, err
+	}
 	u, err := s.users.FindOrCreateByEmail(email)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.mems.Add(u.ID, siteID, role, canPublish); err != nil {
-		return nil, err
-	}
-	if err := s.invites.CancelPendingFor(siteID, u.Email); err != nil {
+	if err := s.AddMembership(u, siteID, role, canPublish); err != nil {
 		return nil, err
 	}
 	return u, nil
+}
+
+// AddMembership gives an existing person a membership on the site and
+// cancels any pending invite for them there.
+func (s *Service) AddMembership(u *models.User, siteID int64, role string, canPublish bool) error {
+	if err := s.mems.Add(u.ID, siteID, role, canPublish); err != nil {
+		return err
+	}
+	return s.invites.CancelPendingFor(siteID, u.Email)
 }

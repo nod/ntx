@@ -88,7 +88,7 @@ func (s *InviteStore) Create(siteID int64, email, role string, canPublish bool, 
 	if err := validate.Email(email); err != nil {
 		return nil, "", invalid("%s", err)
 	}
-	if err := validRole(role); err != nil {
+	if err := ValidRole(role); err != nil {
 		return nil, "", err
 	}
 	token, err := newToken()
