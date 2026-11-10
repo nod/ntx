@@ -207,7 +207,7 @@ func TestEditorPendingNotices(t *testing.T) {
 	me := e.member("me@x.io", models.RoleContributor, false)
 	p := e.authored(me, "live", true)
 	p, _ = e.posts.ForSite(e.siteA.ID).GetByID(p.ID)
-	if _, err := e.posts.ForSite(e.siteA.ID).SavePending(p.ID, me.ID, "Pending", "b", nil, p.UpdatedAt); err != nil {
+	if _, err := e.posts.ForSite(e.siteA.ID).SavePending(p.ID, me.ID, "Pending", "b", nil, p.ContentUpdatedAt); err != nil {
 		t.Fatal(err)
 	}
 	editPath := "/admin/posts/" + itoa(p.ID) + "/edit"
@@ -343,6 +343,85 @@ func TestPostListStatuses(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("post list lacks %q", want)
 		}
+	}
+}
+
+// An editor shown again after a refused save still carries the post's
+// version, or a later pending save from it would read as stale.
+func TestEditorAfterErrorKeepsBase(t *testing.T) {
+	e := newEnv(t)
+	me := e.member("me@x.io", models.RoleContributor, true)
+	e.authored(me, "taken", true)
+	p := e.authored(me, "mine", true)
+	rec := e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(p.ID), postForm("T", "taken", "save"), e.sessionFor(me))
+	if rec.Code != http.StatusOK || !strings.Contains(text(rec), "already uses the slug") {
+		t.Fatalf("duplicate slug save: %d %s", rec.Code, text(rec))
+	}
+	post, _ := e.posts.ForSite(e.siteA.ID).GetByID(p.ID)
+	if got, want := editorBase(t, rec), post.ContentUpdatedAt.Format(time.RFC3339Nano); got != want {
+		t.Errorf("editor base after an error = %s, want %s", got, want)
+	}
+}
+
+// A direct save from an editor opened before someone else changed the
+// post's content is refused, keeping the person's text; saving again from
+// that page overwrites on purpose.
+func TestDirectEditConflict(t *testing.T) {
+	e := newEnv(t)
+	me := e.member("me@x.io", models.RoleContributor, true)
+	p := e.authored(me, "live", true)
+	c := e.sessionFor(me)
+	path := "/admin/posts/" + itoa(p.ID)
+	base := editorBase(t, e.do(http.MethodGet, hostA, path+"/edit", nil, c))
+	if rec := e.do(http.MethodPost, hostA, path, postForm("Admin title", "live", "save"), e.siteAdminCookie()); rec.Code != http.StatusSeeOther {
+		t.Fatalf("admin save: %d", rec.Code)
+	}
+
+	mine := postForm("My title", "live", "save")
+	mine.Set("base", base)
+	rec := e.do(http.MethodPost, hostA, path, mine, c)
+	body := text(rec)
+	if rec.Code != http.StatusConflict || !strings.Contains(body, "Someone else changed this post since you opened it.") || !strings.Contains(body, "My title") {
+		t.Fatalf("save from an outdated editor: %d %s", rec.Code, body)
+	}
+	ps := e.posts.ForSite(e.siteA.ID)
+	post, _ := ps.GetByID(p.ID)
+	if post.Title != "Admin title" {
+		t.Fatalf("the other edit was overwritten: %+v", post)
+	}
+	if got, want := editorBase(t, rec), post.ContentUpdatedAt.Format(time.RFC3339Nano); got != want {
+		t.Fatalf("conflict page base = %s, want the current version %s", got, want)
+	}
+
+	mine.Set("base", editorBase(t, rec))
+	if rec := e.do(http.MethodPost, hostA, path, mine, c); rec.Code != http.StatusSeeOther {
+		t.Fatalf("saving again from the conflict page: %d %s", rec.Code, text(rec))
+	}
+	if post, _ := ps.GetByID(p.ID); post.Title != "My title" {
+		t.Fatalf("saving again didn't apply: %+v", post)
+	}
+}
+
+// The case that prompted it: an admin's editor was open while pending
+// changes were published. Unpublishing from that editor would put the old
+// text back; it is refused instead.
+func TestEditorOpenWhilePendingPublished(t *testing.T) {
+	e := newEnv(t)
+	me := e.member("me@x.io", models.RoleContributor, false)
+	p := e.authored(me, "live", true)
+	rev := e.pending(e.siteA.ID, me, p, "Reworded")
+	admin := e.siteAdminCookie()
+	path := "/admin/posts/" + itoa(p.ID)
+	base := editorBase(t, e.do(http.MethodGet, hostA, path+"/edit", nil, admin))
+	if rec := e.do(http.MethodPost, hostA, pendingPath(p, "publish"), revisionForm(rev, ""), admin); rec.Code != http.StatusSeeOther {
+		t.Fatalf("publish changes: %d", rec.Code)
+	}
+	old := url.Values{"title": {p.Title}, "slug": {p.Slug}, "body": {p.Body}, "tags": {""}, "action": {"unpublish"}, "base": {base}}
+	if rec := e.do(http.MethodPost, hostA, path, old, admin); rec.Code != http.StatusConflict {
+		t.Fatalf("unpublish from an outdated editor: %d %s", rec.Code, text(rec))
+	}
+	if post, _ := e.posts.ForSite(e.siteA.ID).GetByID(p.ID); post.Title != "Reworded" || !post.Published {
+		t.Fatalf("the published changes were undone: %+v", post)
 	}
 }
 

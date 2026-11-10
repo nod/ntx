@@ -76,7 +76,7 @@ func (h *Handler) pendingPage(w http.ResponseWriter, r *http.Request, site *mode
 		"Author":   authorLabel(author),
 		"Stale":    rev.Stale(post),
 		"Revision": rev.UpdatedAt.Format(time.RFC3339Nano),
-		"Version":  post.UpdatedAt.Format(time.RFC3339Nano),
+		"Version":  post.ContentUpdatedAt.Format(time.RFC3339Nano),
 		"Notice":   notice,
 	})
 }

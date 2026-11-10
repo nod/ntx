@@ -81,7 +81,7 @@ func TestDeletingSiteCascades(t *testing.T) {
 	}
 	must("INSERT INTO users (id, name, is_root, is_platform_admin, created_at) VALUES (1, 'root', TRUE, FALSE, CURRENT_TIMESTAMP)")
 	must("INSERT INTO sites (id, key, hostname, name, description, about_slug, theme, created_at, updated_at) VALUES (1, 'a', 'a.example.com', 'A', '', 'about', 'default', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
-	must("INSERT INTO posts (site_id, slug, title, body, published, created_at, updated_at) VALUES (1, 'p', 'P', '.', FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+	must("INSERT INTO posts (site_id, slug, title, body, published, created_at, updated_at, content_updated_at) VALUES (1, 'p', 'P', '.', FALSE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
 	must("INSERT INTO sessions (token_hash, user_id, site_id, created_at, expires_at, last_seen_at) VALUES ('h', 1, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
 	must("DELETE FROM sites WHERE id = 1")
 	if n := count(t, d, "posts"); n != 0 {

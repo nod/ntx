@@ -85,6 +85,7 @@ CREATE TABLE posts (
     first_published_at DATETIME,
     created_at         DATETIME NOT NULL,
     updated_at         DATETIME NOT NULL,
+    content_updated_at DATETIME NOT NULL, -- title, body or tags last changed
     UNIQUE (site_id, slug)
 );
 

@@ -168,8 +168,8 @@ func TestDeleteUserKeepsPosts(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	if err := f.db.Exec(`INSERT INTO posts (site_id, author_id, slug, title, body, published, created_at, updated_at)
-		VALUES (?, ?, 'kept', 'Kept', 'body', TRUE, ?, ?)`, f.a.ID, u.ID, now, now).Error; err != nil {
+	if err := f.db.Exec(`INSERT INTO posts (site_id, author_id, slug, title, body, published, created_at, updated_at, content_updated_at)
+		VALUES (?, ?, 'kept', 'Kept', 'body', TRUE, ?, ?, ?)`, f.a.ID, u.ID, now, now, now).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := f.users.Delete(u.ID); err != nil {

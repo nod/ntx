@@ -154,11 +154,15 @@ func (h *Handler) Posts(w http.ResponseWriter, r *http.Request) {
 // live-once post without can_publish: the form shows their pending
 // changes (if any), the slug is fixed, and Save stores a revision.
 func (h *Handler) editor(w http.ResponseWriter, r *http.Request, site *models.Site, post *models.Post, errMsg string) {
+	h.editorStatus(w, r, site, http.StatusOK, post, errMsg)
+}
+
+func (h *Handler) editorStatus(w http.ResponseWriter, r *http.Request, site *models.Site, status int, post *models.Post, errMsg string) {
 	a := auth.ActorFrom(r)
 	data := map[string]any{"Post": post, "Error": errMsg, "Mode": "direct"}
 	if post == nil || post.ID == 0 {
 		data["CanPublish"], data["CanDelete"] = authz.CanPublishOwn(a), false
-		h.admin(w, r, "editor", data)
+		h.adminStatus(w, r, status, "editor", data)
 		return
 	}
 	rev, err := h.posts(site).GetPending(post.ID)
@@ -170,7 +174,7 @@ func (h *Handler) editor(w http.ResponseWriter, r *http.Request, site *models.Si
 	// Base is the post as this editor shows it. A save that turns into
 	// pending changes -- including a draft published while it was open --
 	// compares against it to warn the reviewer.
-	data["Base"] = post.UpdatedAt.Format(time.RFC3339Nano)
+	data["Base"] = post.ContentUpdatedAt.Format(time.RFC3339Nano)
 	if authz.SavesAsPending(a, post) {
 		data["Mode"] = "pending"
 		if rev != nil {
@@ -182,7 +186,7 @@ func (h *Handler) editor(w http.ResponseWriter, r *http.Request, site *models.Si
 		data["CanPublish"], data["CanDelete"] = authz.CanPublishPost(a, post), authz.CanDeletePost(a, post)
 		data["ReviewLink"] = authz.CanReviewChanges(a, post)
 	}
-	h.admin(w, r, "editor", data)
+	h.adminStatus(w, r, status, "editor", data)
 }
 
 func (h *Handler) forbidden(w http.ResponseWriter, r *http.Request) {
@@ -278,6 +282,10 @@ func (h *Handler) UpdatePost(w http.ResponseWriter, r *http.Request) {
 			h.forbidden(w, r)
 			return
 		}
+		// The content version this editor opened; a save over someone
+		// else's newer edit is refused (models.ErrEditConflict). A form
+		// without one isn't checked.
+		updated.ContentUpdatedAt, _ = time.Parse(time.RFC3339Nano, r.FormValue("base"))
 		var err error
 		switch action {
 		case "publish", "unpublish":
@@ -301,13 +309,36 @@ func (h *Handler) UpdatePost(w http.ResponseWriter, r *http.Request) {
 			}
 			updated.Published = existing.Published
 		}
+		if errors.Is(err, models.ErrEditConflict) {
+			h.editConflict(w, r, site, ps, updated)
+			return
+		}
 		if err != nil {
-			updated.AuthorID, updated.FirstPublishedAt, updated.UpdatedAt = existing.AuthorID, existing.FirstPublishedAt, existing.UpdatedAt
+			updated.AuthorID, updated.FirstPublishedAt, updated.UpdatedAt, updated.ContentUpdatedAt = existing.AuthorID, existing.FirstPublishedAt, existing.UpdatedAt, existing.ContentUpdatedAt
 			h.editor(w, r, site, updated, err.Error())
 			return
 		}
 		http.Redirect(w, r, "/admin/posts", http.StatusSeeOther)
 	})
+}
+
+// editConflict shows the editor again with the person's edit, refused
+// because someone else changed the post since it was opened. Its base is
+// the post's current version, so saving again overwrites on purpose.
+func (h *Handler) editConflict(w http.ResponseWriter, r *http.Request, site *models.Site, ps *models.PostStore, edit *models.Post) {
+	cur, err := ps.GetByID(edit.ID)
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
+	if cur == nil {
+		h.notFound(w)
+		return
+	}
+	edit.AuthorID, edit.FirstPublishedAt, edit.Published = cur.AuthorID, cur.FirstPublishedAt, cur.Published
+	edit.UpdatedAt, edit.ContentUpdatedAt = cur.UpdatedAt, cur.ContentUpdatedAt
+	h.editorStatus(w, r, site, http.StatusConflict, edit,
+		"Someone else changed this post since you opened it. Your version is below, and nothing was saved. Save again to replace their changes with yours, or open the post in another tab to see theirs.")
 }
 
 // savePending stores the form's edit as postID's pending changes and

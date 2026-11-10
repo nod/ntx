@@ -32,8 +32,8 @@ type Revision struct {
 	Title    string
 	Body     string
 	Tags     []string
-	// BaseUpdatedAt is the post's UpdatedAt when the contributor started
-	// editing; kept when the revision is saved again.
+	// BaseUpdatedAt is the post's ContentUpdatedAt when the contributor
+	// started editing; kept when the revision is saved again.
 	BaseUpdatedAt time.Time
 	CreatedAt     time.Time
 	// UpdatedAt identifies this version of the revision: publish and
@@ -43,7 +43,7 @@ type Revision struct {
 
 // Stale reports whether p was changed since the revision was started.
 // Both times must be values read back from the database.
-func (r *Revision) Stale(p *Post) bool { return !p.UpdatedAt.Equal(r.BaseUpdatedAt) }
+func (r *Revision) Stale(p *Post) bool { return !p.ContentUpdatedAt.Equal(r.BaseUpdatedAt) }
 
 type dbRevision struct {
 	ID            uint `gorm:"primarykey;autoIncrement"`
@@ -53,17 +53,17 @@ type dbRevision struct {
 	Body          string
 	Tags          string // JSON array
 	BaseUpdatedAt time.Time
-	// Written explicitly (see revisionNow), never by GORM.
+	// Written explicitly (see dbNow), never by GORM.
 	CreatedAt time.Time `gorm:"autoCreateTime:false"`
 	UpdatedAt time.Time `gorm:"autoUpdateTime:false"`
 }
 
 func (dbRevision) TableName() string { return "post_revisions" }
 
-// revisionNow is truncated to microseconds, so the value Go holds is the
+// dbNow is truncated to microseconds, so the value Go holds is the
 // value both SQLite and Postgres store, and a version read back compares
 // Equal to the one written.
-func revisionNow() time.Time { return time.Now().UTC().Truncate(time.Microsecond) }
+func dbNow() time.Time { return time.Now().UTC().Truncate(time.Microsecond) }
 
 func toRevision(r dbRevision) (*Revision, error) {
 	var tags []string
@@ -163,7 +163,7 @@ func (s *PostStore) SavePending(postID, authorID int64, title, body string, tags
 		if err != nil {
 			return err
 		}
-		now := revisionNow()
+		now := dbNow()
 		if existing == nil {
 			saved = dbRevision{
 				PostID: postID, AuthorID: &authorID, Title: title, Body: body, Tags: string(tagJSON),
@@ -192,7 +192,7 @@ func (s *PostStore) SavePending(postID, authorID int64, title, body string, tags
 // revision's UpdatedAt as shown to the admin: if it has changed since,
 // nothing happens (ErrRevisionChanged). If the post was edited after the
 // revision was started, nothing happens (ErrStale) unless overwrite is the
-// post's current UpdatedAt: the version the admin saw and agreed to
+// post's current ContentUpdatedAt: the version the admin saw and agreed to
 // overwrite. The zero time agrees to nothing. Slug and published state are
 // never changed.
 func (s *PostStore) PublishPending(postID int64, seen, overwrite time.Time) error {
@@ -208,7 +208,7 @@ func (s *PostStore) PublishPending(postID int64, seen, overwrite time.Time) erro
 		if r == nil || !r.UpdatedAt.Equal(seen) {
 			return ErrRevisionChanged
 		}
-		if !p.UpdatedAt.Equal(r.BaseUpdatedAt) && !p.UpdatedAt.Equal(overwrite) {
+		if !p.ContentUpdatedAt.Equal(r.BaseUpdatedAt) && !p.ContentUpdatedAt.Equal(overwrite) {
 			return ErrStale
 		}
 		rev, err := toRevision(*r)
@@ -220,7 +220,7 @@ func (s *PostStore) PublishPending(postID int64, seen, overwrite time.Time) erro
 			return err
 		}
 		target := dbPost{ID: p.ID}
-		if err := tx.Model(&target).Where("site_id = ?", s.siteID).Updates(map[string]any{"title": rev.Title, "body": rev.Body}).Error; err != nil {
+		if err := tx.Model(&target).Where("site_id = ?", s.siteID).Updates(map[string]any{"title": rev.Title, "body": rev.Body, "content_updated_at": dbNow()}).Error; err != nil {
 			return err
 		}
 		if err := tx.Model(&target).Association("Tags").Replace(tags); err != nil {

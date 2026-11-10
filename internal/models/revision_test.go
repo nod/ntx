@@ -52,7 +52,7 @@ func TestSavePendingRefusesNeverPublished(t *testing.T) {
 		t.Fatal(err)
 	}
 	d = mustGet(t, ps, d.ID)
-	if _, err := ps.SavePending(d.ID, u.ID, "New", "nb", nil, d.UpdatedAt); !errors.Is(err, ErrNotLiveOnce) {
+	if _, err := ps.SavePending(d.ID, u.ID, "New", "nb", nil, d.ContentUpdatedAt); !errors.Is(err, ErrNotLiveOnce) {
 		t.Fatalf("SavePending on a draft = %v, want ErrNotLiveOnce", err)
 	}
 	if r, err := ps.GetPending(d.ID); r != nil || err != nil {
@@ -65,7 +65,7 @@ func TestSavePendingLeavesPostAlone(t *testing.T) {
 	u := f.person(t, "w@x.io")
 	ps := NewPostStore(f.db).ForSite(f.a.ID)
 	p := livePost(t, ps, u, "live", true, "old")
-	if _, err := ps.SavePending(p.ID, u.ID, "New", "nb", []string{" new ", ""}, p.UpdatedAt); err != nil {
+	if _, err := ps.SavePending(p.ID, u.ID, "New", "nb", []string{" new ", ""}, p.ContentUpdatedAt); err != nil {
 		t.Fatal(err)
 	}
 	got := mustGet(t, ps, p.ID)
@@ -94,11 +94,11 @@ func TestSavePendingOverwrites(t *testing.T) {
 	u := f.person(t, "w@x.io")
 	ps := NewPostStore(f.db).ForSite(f.a.ID)
 	p := livePost(t, ps, u, "live", true)
-	if _, err := ps.SavePending(p.ID, u.ID, "First", "b", nil, p.UpdatedAt); err != nil {
+	if _, err := ps.SavePending(p.ID, u.ID, "First", "b", nil, p.ContentUpdatedAt); err != nil {
 		t.Fatal(err)
 	}
 	first := mustPending(t, ps, p.ID)
-	if _, err := ps.SavePending(p.ID, u.ID, "Second", "b", nil, p.UpdatedAt.Add(1e9)); err != nil {
+	if _, err := ps.SavePending(p.ID, u.ID, "Second", "b", nil, p.ContentUpdatedAt.Add(1e9)); err != nil {
 		t.Fatal(err)
 	}
 	second := mustPending(t, ps, p.ID)
@@ -118,7 +118,7 @@ func TestPendingNotStaleWhenUntouched(t *testing.T) {
 	u := f.person(t, "w@x.io")
 	ps := NewPostStore(f.db).ForSite(f.a.ID)
 	p := livePost(t, ps, u, "live", true)
-	if _, err := ps.SavePending(p.ID, u.ID, "New", "nb", nil, p.UpdatedAt); err != nil {
+	if _, err := ps.SavePending(p.ID, u.ID, "New", "nb", nil, p.ContentUpdatedAt); err != nil {
 		t.Fatal(err)
 	}
 	if r := mustPending(t, ps, p.ID); r.Stale(mustGet(t, ps, p.ID)) {
@@ -139,7 +139,7 @@ func TestPublishPendingCopiesContent(t *testing.T) {
 		u := f.person(t, "w@x.io")
 		ps := NewPostStore(f.db).ForSite(f.a.ID)
 		p := livePost(t, ps, u, "live", published, "t1")
-		r, err := ps.SavePending(p.ID, u.ID, "New", "nb", []string{"t2"}, p.UpdatedAt)
+		r, err := ps.SavePending(p.ID, u.ID, "New", "nb", []string{"t2"}, p.ContentUpdatedAt)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -162,7 +162,7 @@ func TestPublishPendingStale(t *testing.T) {
 	u := f.person(t, "w@x.io")
 	ps := NewPostStore(f.db).ForSite(f.a.ID)
 	p := livePost(t, ps, u, "live", true)
-	if _, err := ps.SavePending(p.ID, u.ID, "New", "nb", nil, p.UpdatedAt); err != nil {
+	if _, err := ps.SavePending(p.ID, u.ID, "New", "nb", nil, p.ContentUpdatedAt); err != nil {
 		t.Fatal(err)
 	}
 	r := mustPending(t, ps, p.ID)
@@ -177,7 +177,7 @@ func TestPublishPendingStale(t *testing.T) {
 		t.Fatalf("refused publish changed the post: %+v", got)
 	}
 	mustPending(t, ps, p.ID)
-	if err := ps.PublishPending(p.ID, r.UpdatedAt, mustGet(t, ps, p.ID).UpdatedAt); err != nil {
+	if err := ps.PublishPending(p.ID, r.UpdatedAt, mustGet(t, ps, p.ID).ContentUpdatedAt); err != nil {
 		t.Fatal(err)
 	}
 	if got := mustGet(t, ps, p.ID); got.Title != "New" {
@@ -190,15 +190,15 @@ func TestPublishPendingRefusesNewerRevision(t *testing.T) {
 	u := f.person(t, "w@x.io")
 	ps := NewPostStore(f.db).ForSite(f.a.ID)
 	p := livePost(t, ps, u, "live", true)
-	if _, err := ps.SavePending(p.ID, u.ID, "First", "b", nil, p.UpdatedAt); err != nil {
+	if _, err := ps.SavePending(p.ID, u.ID, "First", "b", nil, p.ContentUpdatedAt); err != nil {
 		t.Fatal(err)
 	}
 	rev1 := mustPending(t, ps, p.ID)
-	if _, err := ps.SavePending(p.ID, u.ID, "Second", "b", nil, p.UpdatedAt); err != nil {
+	if _, err := ps.SavePending(p.ID, u.ID, "Second", "b", nil, p.ContentUpdatedAt); err != nil {
 		t.Fatal(err)
 	}
 	rev2 := mustPending(t, ps, p.ID)
-	if err := ps.PublishPending(p.ID, rev1.UpdatedAt, mustGet(t, ps, p.ID).UpdatedAt); !errors.Is(err, ErrRevisionChanged) {
+	if err := ps.PublishPending(p.ID, rev1.UpdatedAt, mustGet(t, ps, p.ID).ContentUpdatedAt); !errors.Is(err, ErrRevisionChanged) {
 		t.Fatalf("publishing an outdated view = %v, want ErrRevisionChanged", err)
 	}
 	if got := mustGet(t, ps, p.ID); got.Title != "Title live" {
@@ -227,7 +227,7 @@ func TestPendingScopedToSite(t *testing.T) {
 	u := f.person(t, "w@x.io")
 	ps := NewPostStore(f.db).ForSite(f.a.ID)
 	p := livePost(t, ps, u, "live", true)
-	if _, err := ps.SavePending(p.ID, u.ID, "New", "nb", nil, p.UpdatedAt); err != nil {
+	if _, err := ps.SavePending(p.ID, u.ID, "New", "nb", nil, p.ContentUpdatedAt); err != nil {
 		t.Fatal(err)
 	}
 	r := mustPending(t, ps, p.ID)
@@ -238,10 +238,10 @@ func TestPendingScopedToSite(t *testing.T) {
 	if ids, _ := other.PendingIDs(); len(ids) != 0 {
 		t.Fatalf("site B's PendingIDs = %v", ids)
 	}
-	if _, err := other.SavePending(p.ID, u.ID, "B", "b", nil, p.UpdatedAt); err == nil {
+	if _, err := other.SavePending(p.ID, u.ID, "B", "b", nil, p.ContentUpdatedAt); err == nil {
 		t.Fatal("site B saved a revision onto site A's post")
 	}
-	if err := other.PublishPending(p.ID, r.UpdatedAt, p.UpdatedAt); err == nil {
+	if err := other.PublishPending(p.ID, r.UpdatedAt, p.ContentUpdatedAt); err == nil {
 		t.Fatal("site B published site A's revision")
 	}
 	if err := other.DiscardPending(p.ID, r.UpdatedAt); err == nil {
@@ -262,7 +262,7 @@ func TestRevisionCascadesAndOrphans(t *testing.T) {
 	gone := livePost(t, ps, u, "gone", true)
 	kept := livePost(t, ps, u, "kept", true)
 	for _, p := range []*Post{gone, kept} {
-		if _, err := ps.SavePending(p.ID, u.ID, "New", "nb", nil, p.UpdatedAt); err != nil {
+		if _, err := ps.SavePending(p.ID, u.ID, "New", "nb", nil, p.ContentUpdatedAt); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -340,13 +340,13 @@ func TestPublishAnywayOnlyOverVersionSeen(t *testing.T) {
 	if err := ps.Update(&again); err != nil {
 		t.Fatal(err)
 	}
-	if err := ps.PublishPending(p.ID, r.UpdatedAt, seen.UpdatedAt); !errors.Is(err, ErrStale) {
+	if err := ps.PublishPending(p.ID, r.UpdatedAt, seen.ContentUpdatedAt); !errors.Is(err, ErrStale) {
 		t.Fatalf("publish anyway over an older version = %v, want ErrStale", err)
 	}
 	if got := mustGet(t, ps, p.ID); got.Title != "Second edit" {
 		t.Fatalf("the second edit was overwritten: %+v", got)
 	}
-	if err := ps.PublishPending(p.ID, r.UpdatedAt, mustGet(t, ps, p.ID).UpdatedAt); err != nil {
+	if err := ps.PublishPending(p.ID, r.UpdatedAt, mustGet(t, ps, p.ID).ContentUpdatedAt); err != nil {
 		t.Fatalf("publish anyway over the current version: %v", err)
 	}
 }

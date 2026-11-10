@@ -127,8 +127,9 @@ by side:
   stays unpublished.
 - **Discard** throws the pending changes away.
 
-If someone edited the post directly after the contributor started editing, the
-page warns that publishing will overwrite those edits, and the button becomes
+If someone edited the post's title, body or tags after the contributor started
+editing, the page warns that publishing will overwrite those edits (publishing,
+unpublishing or renaming the slug doesn't count), and the button becomes
 **publish anyway**. If the contributor saves again while you have the page open,
 or someone edits the post again, publishing stops and shows you the newer
 version instead, so you never publish over, or publish, text you haven't seen.
@@ -251,6 +252,12 @@ the theme's `static/assets/`, or change the `src` in `base.html` and `home.html`
 Posts are written in Markdown (CommonMark + GitHub Flavored Markdown). Raw HTML
 in post bodies is stripped for safety. Sign in on a site's hostname and use
 **posts**; each site's admin shows only its own posts.
+
+If someone else changes a post's title, body or tags while you have it open
+(another editor, or pending changes being published), your save is refused
+instead of silently replacing their work. The editor comes back with your
+version and nothing saved; saving again from that page replaces their changes
+with yours.
 
 ## Content sections
 
