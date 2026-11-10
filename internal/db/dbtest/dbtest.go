@@ -88,12 +88,20 @@ func Schema(t testing.TB) string {
 // tx ends.
 func AwaitBlocked(t testing.TB, tx *gorm.DB) {
 	t.Helper()
-	if err := awaitBlocked(tx, 10*time.Second); err != nil {
+	AwaitBlockedN(t, tx, 1)
+}
+
+// AwaitBlockedN is AwaitBlocked for n waiting connections. A connection
+// counts when it waits on tx directly or on another one that counts, so a
+// request queued behind another stuck request is included.
+func AwaitBlockedN(t testing.TB, tx *gorm.DB, n int) {
+	t.Helper()
+	if err := awaitBlocked(tx, n, 10*time.Second); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func awaitBlocked(tx *gorm.DB, within time.Duration) error {
+func awaitBlocked(tx *gorm.DB, n int, within time.Duration) error {
 	if tx.Dialector.Name() != "postgres" {
 		return nil
 	}
@@ -102,21 +110,27 @@ func awaitBlocked(tx *gorm.DB, within time.Duration) error {
 		return err
 	}
 	// A connection of its own: tx's is busy holding the locks, and the
-	// pool may be busy with the waiter.
+	// pool may be busy with the waiters.
 	watch, err := sql.Open("pgx", os.Getenv(EnvDSN))
 	if err != nil {
 		return err
 	}
 	defer watch.Close()
+	const waiters = `
+WITH RECURSIVE behind(pid) AS (
+	SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))
+	UNION
+	SELECT a.pid FROM pg_stat_activity a JOIN behind b ON b.pid = ANY(pg_blocking_pids(a.pid))
+)
+SELECT count(*) FROM behind`
+	got := 0
 	for deadline := time.Now().Add(within); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		var waiting bool
-		err := watch.QueryRow("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))", pid).Scan(&waiting)
-		if err != nil {
+		if err := watch.QueryRow(waiters, pid).Scan(&got); err != nil {
 			return err
 		}
-		if waiting {
+		if got >= n {
 			return nil
 		}
 	}
-	return fmt.Errorf("nothing waited on the open transaction within %v", within)
+	return fmt.Errorf("%d of %d connections waited on the open transaction within %v", got, n, within)
 }
