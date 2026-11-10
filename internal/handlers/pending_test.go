@@ -2,8 +2,10 @@ package handlers
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -40,12 +42,26 @@ func pendingPath(p *models.Post, action string) string {
 	return path
 }
 
-func revisionForm(r *models.Revision, confirm bool) url.Values {
+// revisionForm is the publish or discard form for r; confirm, if set, is
+// the "publish anyway" value from the page (see pageConfirm).
+func revisionForm(r *models.Revision, confirm string) url.Values {
 	f := url.Values{"revision": {revisionAt(r)}}
-	if confirm {
-		f.Set("confirm", "1")
+	if confirm != "" {
+		f.Set("confirm", confirm)
 	}
 	return f
+}
+
+var confirmRe = regexp.MustCompile(`name="confirm" value="([^"]*)"`)
+
+// pageConfirm is the "publish anyway" value a review page carries.
+func pageConfirm(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	m := confirmRe.FindStringSubmatch(text(rec))
+	if m == nil {
+		t.Fatalf("page has no publish anyway: %s", rec.Body.String())
+	}
+	return m[1]
 }
 
 func TestAdminPublishesPendingChanges(t *testing.T) {
@@ -62,7 +78,7 @@ func TestAdminPublishesPendingChanges(t *testing.T) {
 	if strings.Contains(body, "edited after these changes were started") {
 		t.Fatal("untouched post shows the stale warning")
 	}
-	if rec := e.do(http.MethodPost, hostA, pendingPath(p, "publish"), revisionForm(rev, false), admin); rec.Code != http.StatusSeeOther {
+	if rec := e.do(http.MethodPost, hostA, pendingPath(p, "publish"), revisionForm(rev, ""), admin); rec.Code != http.StatusSeeOther {
 		t.Fatalf("publish changes: %d %s", rec.Code, text(rec))
 	}
 	if body := e.do(http.MethodGet, hostA, "/blog/live", nil, nil).Body.String(); !strings.Contains(body, "Reworded") {
@@ -93,7 +109,7 @@ func TestPublishChangesKeepsUnpublished(t *testing.T) {
 		t.Fatal(err)
 	}
 	rev := e.pending(e.siteA.ID, me, p, "Reworded")
-	if rec := e.do(http.MethodPost, hostA, pendingPath(p, "publish"), revisionForm(rev, false), e.siteAdminCookie()); rec.Code != http.StatusSeeOther {
+	if rec := e.do(http.MethodPost, hostA, pendingPath(p, "publish"), revisionForm(rev, ""), e.siteAdminCookie()); rec.Code != http.StatusSeeOther {
 		t.Fatalf("publish changes: %d", rec.Code)
 	}
 	post, _ := e.posts.ForSite(e.siteA.ID).GetByID(p.ID)
@@ -114,7 +130,7 @@ func TestStaleChangesNeedConfirmation(t *testing.T) {
 	if rec := e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(p.ID), postForm("Admin edit", "live", "save"), admin); rec.Code != http.StatusSeeOther {
 		t.Fatalf("admin edit: %d", rec.Code)
 	}
-	rec := e.do(http.MethodPost, hostA, pendingPath(p, "publish"), revisionForm(rev, false), admin)
+	rec := e.do(http.MethodPost, hostA, pendingPath(p, "publish"), revisionForm(rev, ""), admin)
 	body := text(rec)
 	if rec.Code != http.StatusConflict || !strings.Contains(body, "This post was edited after these changes were started. Publishing them will overwrite those edits.") || !strings.Contains(body, "publish anyway") {
 		t.Fatalf("stale publish without confirmation: %d %s", rec.Code, body)
@@ -126,7 +142,7 @@ func TestStaleChangesNeedConfirmation(t *testing.T) {
 	if r, _ := ps.GetPending(p.ID); r == nil {
 		t.Fatal("refused publish removed the revision")
 	}
-	if rec := e.do(http.MethodPost, hostA, pendingPath(p, "publish"), revisionForm(rev, true), admin); rec.Code != http.StatusSeeOther {
+	if rec := e.do(http.MethodPost, hostA, pendingPath(p, "publish"), revisionForm(rev, pageConfirm(t, rec)), admin); rec.Code != http.StatusSeeOther {
 		t.Fatalf("confirmed publish: %d %s", rec.Code, text(rec))
 	}
 	if post, _ := ps.GetByID(p.ID); post.Title != "Reworded" {
@@ -144,7 +160,7 @@ func TestPublishChangesRefusesNewerRevision(t *testing.T) {
 		t.Fatalf("pending page: %d", rec.Code)
 	}
 	e.pending(e.siteA.ID, me, p, "Second")
-	rec := e.do(http.MethodPost, hostA, pendingPath(p, "publish"), revisionForm(seen, true), admin)
+	rec := e.do(http.MethodPost, hostA, pendingPath(p, "publish"), revisionForm(seen, ""), admin)
 	body := text(rec)
 	if rec.Code != http.StatusConflict || !strings.Contains(body, "saved again") || !strings.Contains(body, "Second") {
 		t.Fatalf("publishing an outdated view: %d %s", rec.Code, body)
@@ -153,7 +169,7 @@ func TestPublishChangesRefusesNewerRevision(t *testing.T) {
 	if post, _ := ps.GetByID(p.ID); post.Title != "Title live" {
 		t.Fatalf("outdated publish changed the post: %+v", post)
 	}
-	if rec := e.do(http.MethodPost, hostA, pendingPath(p, "discard"), revisionForm(seen, false), admin); rec.Code != http.StatusConflict {
+	if rec := e.do(http.MethodPost, hostA, pendingPath(p, "discard"), revisionForm(seen, ""), admin); rec.Code != http.StatusConflict {
 		t.Fatalf("discarding an outdated view: %d", rec.Code)
 	}
 	if r, _ := ps.GetPending(p.ID); r == nil || r.Title != "Second" {
@@ -167,7 +183,7 @@ func TestDiscardPendingChanges(t *testing.T) {
 	p := e.authored(me, "live", true)
 	rev := e.pending(e.siteA.ID, me, p, "Reworded")
 	admin := e.siteAdminCookie()
-	if rec := e.do(http.MethodPost, hostA, pendingPath(p, "discard"), revisionForm(rev, false), admin); rec.Code != http.StatusSeeOther {
+	if rec := e.do(http.MethodPost, hostA, pendingPath(p, "discard"), revisionForm(rev, ""), admin); rec.Code != http.StatusSeeOther {
 		t.Fatalf("discard: %d %s", rec.Code, text(rec))
 	}
 	ps := e.posts.ForSite(e.siteA.ID)
@@ -177,7 +193,7 @@ func TestDiscardPendingChanges(t *testing.T) {
 	if post, _ := ps.GetByID(p.ID); post.Title != "Title live" {
 		t.Fatalf("discard changed the post: %+v", post)
 	}
-	rec := e.do(http.MethodPost, hostA, pendingPath(p, "publish"), revisionForm(rev, true), admin)
+	rec := e.do(http.MethodPost, hostA, pendingPath(p, "publish"), revisionForm(rev, ""), admin)
 	if rec.Code != http.StatusConflict || !strings.Contains(text(rec), "These changes were already published or discarded.") {
 		t.Fatalf("publishing discarded changes: %d %s", rec.Code, text(rec))
 	}
@@ -214,7 +230,7 @@ func TestContributorCannotReviewChanges(t *testing.T) {
 			t.Errorf("GET pending on %s: %d, want %d", tc.post.Slug, rec.Code, tc.want)
 		}
 		for _, action := range []string{"publish", "discard"} {
-			if rec := e.do(http.MethodPost, hostA, pendingPath(tc.post, action), revisionForm(tc.rev, true), c); rec.Code != tc.want {
+			if rec := e.do(http.MethodPost, hostA, pendingPath(tc.post, action), revisionForm(tc.rev, ""), c); rec.Code != tc.want {
 				t.Errorf("%s on %s: %d, want %d", action, tc.post.Slug, rec.Code, tc.want)
 			}
 		}
@@ -244,7 +260,7 @@ func TestPendingChangesSiteIsolation(t *testing.T) {
 		t.Fatalf("site A viewing site B's changes: %d", rec.Code)
 	}
 	for _, action := range []string{"publish", "discard"} {
-		if rec := e.do(http.MethodPost, hostA, pendingPath(bp, action), revisionForm(rev, true), admin); rec.Code != http.StatusNotFound {
+		if rec := e.do(http.MethodPost, hostA, pendingPath(bp, action), revisionForm(rev, ""), admin); rec.Code != http.StatusNotFound {
 			t.Fatalf("site A %s on site B's changes: %d", action, rec.Code)
 		}
 	}
@@ -271,7 +287,7 @@ func TestPendingPageFormerMember(t *testing.T) {
 		t.Fatalf("pending page by a deleted author: %d %s", page.Code, text(page))
 	}
 	rev, _ := e.posts.ForSite(e.siteA.ID).GetPending(p.ID)
-	if rec := e.do(http.MethodPost, hostA, pendingPath(p, "publish"), revisionForm(rev, false), admin); rec.Code != http.StatusSeeOther {
+	if rec := e.do(http.MethodPost, hostA, pendingPath(p, "publish"), revisionForm(rev, ""), admin); rec.Code != http.StatusSeeOther {
 		t.Fatalf("publishing a former member's changes: %d", rec.Code)
 	}
 }
@@ -288,5 +304,80 @@ func TestPostListShowsPendingChanges(t *testing.T) {
 	mine := text(e.do(http.MethodGet, hostA, "/admin/posts", nil, e.sessionFor(me)))
 	if !strings.Contains(mine, "pending changes") || strings.Contains(mine, "/pending") {
 		t.Fatalf("contributor's list: %s", mine)
+	}
+}
+
+func TestPublishAnywayRefusesNewerEdit(t *testing.T) {
+	e := newEnv(t)
+	me := e.member("me@x.io", models.RoleContributor, false)
+	p := e.authored(me, "live", true)
+	rev := e.pending(e.siteA.ID, me, p, "Reworded")
+	admin := e.siteAdminCookie()
+	save := func(title string) {
+		t.Helper()
+		if rec := e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(p.ID), postForm(title, "live", "save"), admin); rec.Code != http.StatusSeeOther {
+			t.Fatalf("admin edit: %d", rec.Code)
+		}
+	}
+	save("Admin edit")
+	page := e.do(http.MethodGet, hostA, pendingPath(p, ""), nil, admin)
+	confirm := pageConfirm(t, page)
+	save("Second edit")
+
+	rec := e.do(http.MethodPost, hostA, pendingPath(p, "publish"), revisionForm(rev, confirm), admin)
+	body := text(rec)
+	if rec.Code != http.StatusConflict || !strings.Contains(body, "The post was edited again since you opened this page.") || !strings.Contains(body, "Second edit") {
+		t.Fatalf("publish anyway over a newer edit: %d %s", rec.Code, body)
+	}
+	ps := e.posts.ForSite(e.siteA.ID)
+	if post, _ := ps.GetByID(p.ID); post.Title != "Second edit" {
+		t.Fatalf("the newer edit was overwritten: %+v", post)
+	}
+	if rec := e.do(http.MethodPost, hostA, pendingPath(p, "publish"), revisionForm(rev, pageConfirm(t, rec)), admin); rec.Code != http.StatusSeeOther {
+		t.Fatalf("publish anyway from the refreshed page: %d %s", rec.Code, text(rec))
+	}
+	if post, _ := ps.GetByID(p.ID); post.Title != "Reworded" {
+		t.Fatalf("publish anyway didn't apply: %+v", post)
+	}
+}
+
+// When "publish anyway" is refused because an edit landed while the request
+// was in flight, the page it shows must carry the post as it is now, or the
+// next click is refused again. On Postgres the edit below commits after the
+// handler read the post but before the publish could lock it; on SQLite
+// (one connection) it simply lands first.
+func TestPublishAnywayRefusalShowsCurrentPost(t *testing.T) {
+	e := newEnv(t)
+	me := e.member("me@x.io", models.RoleContributor, false)
+	p := e.authored(me, "live", true)
+	rev := e.pending(e.siteA.ID, me, p, "Reworded")
+	admin := e.siteAdminCookie()
+	if rec := e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(p.ID), postForm("Admin edit", "live", "save"), admin); rec.Code != http.StatusSeeOther {
+		t.Fatalf("admin edit: %d", rec.Code)
+	}
+	confirm := pageConfirm(t, e.do(http.MethodGet, hostA, pendingPath(p, ""), nil, admin))
+
+	tx := e.db.Begin()
+	if err := tx.Exec("UPDATE posts SET title = 'In flight', updated_at = ? WHERE id = ?", time.Now().Add(time.Second), p.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- e.do(http.MethodPost, hostA, pendingPath(p, "publish"), revisionForm(rev, confirm), admin)
+	}()
+	time.Sleep(200 * time.Millisecond)
+	if err := tx.Commit().Error; err != nil {
+		t.Fatal(err)
+	}
+	rec := <-done
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("publish anyway over an in-flight edit: %d %s", rec.Code, text(rec))
+	}
+	post, _ := e.posts.ForSite(e.siteA.ID).GetByID(p.ID)
+	if got, want := pageConfirm(t, rec), post.UpdatedAt.Format(time.RFC3339Nano); got != want {
+		t.Errorf("refusal page offers to overwrite %s, want the current version %s", got, want)
+	}
+	if !strings.Contains(text(rec), "In flight") {
+		t.Errorf("refusal page doesn't show the current post: %s", text(rec))
 	}
 }

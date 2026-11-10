@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 )
 
 // livePost creates a post by u on site A, published or a live-once
@@ -143,7 +144,7 @@ func TestPublishPendingCopiesContent(t *testing.T) {
 			t.Fatal(err)
 		}
 		r = mustPending(t, ps, r.PostID)
-		if err := ps.PublishPending(p.ID, r.UpdatedAt, false); err != nil {
+		if err := ps.PublishPending(p.ID, r.UpdatedAt, time.Time{}); err != nil {
 			t.Fatalf("published=%v: %v", published, err)
 		}
 		got := mustGet(t, ps, p.ID)
@@ -169,14 +170,14 @@ func TestPublishPendingStale(t *testing.T) {
 	if err := ps.Update(p); err != nil {
 		t.Fatal(err)
 	}
-	if err := ps.PublishPending(p.ID, r.UpdatedAt, false); !errors.Is(err, ErrStale) {
+	if err := ps.PublishPending(p.ID, r.UpdatedAt, time.Time{}); !errors.Is(err, ErrStale) {
 		t.Fatalf("PublishPending on a stale revision = %v, want ErrStale", err)
 	}
 	if got := mustGet(t, ps, p.ID); got.Title != "Admin edit" {
 		t.Fatalf("refused publish changed the post: %+v", got)
 	}
 	mustPending(t, ps, p.ID)
-	if err := ps.PublishPending(p.ID, r.UpdatedAt, true); err != nil {
+	if err := ps.PublishPending(p.ID, r.UpdatedAt, mustGet(t, ps, p.ID).UpdatedAt); err != nil {
 		t.Fatal(err)
 	}
 	if got := mustGet(t, ps, p.ID); got.Title != "New" {
@@ -197,7 +198,7 @@ func TestPublishPendingRefusesNewerRevision(t *testing.T) {
 		t.Fatal(err)
 	}
 	rev2 := mustPending(t, ps, p.ID)
-	if err := ps.PublishPending(p.ID, rev1.UpdatedAt, true); !errors.Is(err, ErrRevisionChanged) {
+	if err := ps.PublishPending(p.ID, rev1.UpdatedAt, mustGet(t, ps, p.ID).UpdatedAt); !errors.Is(err, ErrRevisionChanged) {
 		t.Fatalf("publishing an outdated view = %v, want ErrRevisionChanged", err)
 	}
 	if got := mustGet(t, ps, p.ID); got.Title != "Title live" {
@@ -240,7 +241,7 @@ func TestPendingScopedToSite(t *testing.T) {
 	if _, err := other.SavePending(p.ID, u.ID, "B", "b", nil, p.UpdatedAt); err == nil {
 		t.Fatal("site B saved a revision onto site A's post")
 	}
-	if err := other.PublishPending(p.ID, r.UpdatedAt, true); err == nil {
+	if err := other.PublishPending(p.ID, r.UpdatedAt, p.UpdatedAt); err == nil {
 		t.Fatal("site B published site A's revision")
 	}
 	if err := other.DiscardPending(p.ID, r.UpdatedAt); err == nil {
@@ -321,5 +322,31 @@ func TestUpdateDraftRefusesLiveOnce(t *testing.T) {
 	}
 	if got := mustGet(t, ps, live.ID); got.Title != "Title live" {
 		t.Fatalf("live post changed: %+v", got)
+	}
+}
+
+// "Publish anyway" agrees to overwrite the post as the admin saw it, not
+// whatever it has become since.
+func TestPublishAnywayOnlyOverVersionSeen(t *testing.T) {
+	_, ps, _, p, r := pendingFixture(t)
+	p.Title = "Admin edit"
+	if err := ps.Update(p); err != nil {
+		t.Fatal(err)
+	}
+	seen := mustGet(t, ps, p.ID)
+	time.Sleep(2 * time.Millisecond)
+	again := *seen
+	again.Title = "Second edit"
+	if err := ps.Update(&again); err != nil {
+		t.Fatal(err)
+	}
+	if err := ps.PublishPending(p.ID, r.UpdatedAt, seen.UpdatedAt); !errors.Is(err, ErrStale) {
+		t.Fatalf("publish anyway over an older version = %v, want ErrStale", err)
+	}
+	if got := mustGet(t, ps, p.ID); got.Title != "Second edit" {
+		t.Fatalf("the second edit was overwritten: %+v", got)
+	}
+	if err := ps.PublishPending(p.ID, r.UpdatedAt, mustGet(t, ps, p.ID).UpdatedAt); err != nil {
+		t.Fatalf("publish anyway over the current version: %v", err)
 	}
 }

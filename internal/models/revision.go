@@ -191,9 +191,11 @@ func (s *PostStore) SavePending(postID, authorID int64, title, body string, tags
 // post and deletes the revision, in one transaction. seen is the
 // revision's UpdatedAt as shown to the admin: if it has changed since,
 // nothing happens (ErrRevisionChanged). If the post was edited after the
-// revision was started, nothing happens unless allowStale (ErrStale).
-// Slug and published state are never changed.
-func (s *PostStore) PublishPending(postID int64, seen time.Time, allowStale bool) error {
+// revision was started, nothing happens (ErrStale) unless overwrite is the
+// post's current UpdatedAt: the version the admin saw and agreed to
+// overwrite. The zero time agrees to nothing. Slug and published state are
+// never changed.
+func (s *PostStore) PublishPending(postID int64, seen, overwrite time.Time) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		p, err := s.lockPostInSite(tx, postID)
 		if err != nil {
@@ -206,7 +208,7 @@ func (s *PostStore) PublishPending(postID int64, seen time.Time, allowStale bool
 		if r == nil || !r.UpdatedAt.Equal(seen) {
 			return ErrRevisionChanged
 		}
-		if !allowStale && !p.UpdatedAt.Equal(r.BaseUpdatedAt) {
+		if !p.UpdatedAt.Equal(r.BaseUpdatedAt) && !p.UpdatedAt.Equal(overwrite) {
 			return ErrStale
 		}
 		rev, err := toRevision(*r)
