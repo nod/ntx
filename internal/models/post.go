@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -325,13 +326,20 @@ func (s *PostStore) resolveTags(names []string) ([]dbTag, error) {
 }
 
 // resolveTagsOn is resolveTags through db, which may be a transaction.
+// Tags are taken in sorted order: inside a transaction each new tag stays
+// locked until commit, and two transactions creating the same new tags in
+// opposite orders would deadlock.
 func (s *PostStore) resolveTagsOn(db *gorm.DB, names []string) ([]dbTag, error) {
-	var tags []dbTag
+	clean := make([]string, 0, len(names))
 	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
+		if name = strings.TrimSpace(name); name != "" {
+			clean = append(clean, name)
 		}
+	}
+	slices.Sort(clean)
+	clean = slices.Compact(clean)
+	var tags []dbTag
+	for _, name := range clean {
 		var t dbTag
 		err := retryOnDuplicate(db, func(tx *gorm.DB) error {
 			t = dbTag{}

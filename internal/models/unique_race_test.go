@@ -207,3 +207,23 @@ func TestNewTagRace(t *testing.T) {
 		t.Errorf("post's tags %v, want the other request's tag %d", ids, other.ID)
 	}
 }
+
+// A double-clicked settings save: both requests replace the site's
+// sections with the same slugs. The later one wins, as it would if they
+// ran one after the other.
+func TestSetSectionsRace(t *testing.T) {
+	f := newPeople(t)
+	tx := begin(t, f.db)
+	mustExec(t, tx.Create(&dbSection{SiteID: f.a.ID, Slug: "notes", Title: "Other", Vars: "{}"}))
+	err := whileOpen(t, tx, true, func() error {
+		return f.sites.SetSections(f.a.ID, []Section{{Slug: "notes", Title: "Mine"}})
+	})
+	if err != nil {
+		t.Fatalf("SetSections: %v", err)
+	}
+	var titles []string
+	mustExec(t, f.db.Model(&dbSection{}).Where("site_id = ?", f.a.ID).Pluck("title", &titles))
+	if len(titles) != 1 || titles[0] != "Mine" {
+		t.Errorf("sections %v, want only the later save", titles)
+	}
+}

@@ -2,6 +2,8 @@ package models
 
 import (
 	"errors"
+	"fmt"
+	"slices"
 	"testing"
 	"time"
 )
@@ -130,5 +132,38 @@ func TestSimultaneousFirstSaves(t *testing.T) {
 	}
 	if got := mustPending(t, ps, p.ID); got.Title != "One" && got.Title != "Two" {
 		t.Errorf("pending title %q", got.Title)
+	}
+}
+
+// Two admins publishing pending changes at once, each adding the same new
+// tags in a different order, must not deadlock: tags are created inside
+// the publish transaction, so they have to be taken in one order.
+func TestPublishesWithNewTagsInOppositeOrder(t *testing.T) {
+	f := newPeople(t)
+	u := f.person(t, "w@x.io")
+	ps := NewPostStore(f.db).ForSite(f.a.ID)
+	for round := range 5 {
+		var names []string
+		for i := range 30 {
+			names = append(names, fmt.Sprintf("r%d-t%02d", round, i))
+		}
+		reversed := slices.Clone(names)
+		slices.Reverse(reversed)
+		var seen [2]time.Time
+		var ids [2]int64
+		for i, tags := range [][]string{names, reversed} {
+			p := livePost(t, ps, u, fmt.Sprintf("r%d-p%d", round, i), true)
+			if _, err := ps.SavePending(p.ID, u.ID, "New", "b", tags, p.UpdatedAt); err != nil {
+				t.Fatal(err)
+			}
+			ids[i], seen[i] = p.ID, mustPending(t, ps, p.ID).UpdatedAt
+		}
+		errs := make(chan error, 2)
+		for i := range 2 {
+			go func() { errs <- ps.PublishPending(ids[i], seen[i], time.Time{}) }()
+		}
+		if err := errors.Join(<-errs, <-errs); err != nil {
+			t.Fatalf("round %d: %v", round, err)
+		}
 	}
 }
