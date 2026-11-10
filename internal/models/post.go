@@ -29,6 +29,10 @@ type Post struct {
 	FirstPublishedAt *time.Time
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+	// ContentUpdatedAt is when the title, body or tags last changed: the
+	// version pending changes are compared against. Publishing,
+	// unpublishing, a slug change or a save without changes leave it alone.
+	ContentUpdatedAt time.Time
 }
 
 // dbPost is the internal GORM model. TableName ensures GORM uses "posts".
@@ -45,6 +49,7 @@ type dbPost struct {
 	FirstPublishedAt *time.Time
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+	ContentUpdatedAt time.Time
 }
 
 func (dbPost) TableName() string { return "posts" }
@@ -176,6 +181,8 @@ func (s *PostStore) Create(p *Post) error {
 		Published: p.Published,
 		Tags:      tags,
 		AuthorID:  p.AuthorID,
+
+		ContentUpdatedAt: dbNow(),
 	}
 	if p.Published {
 		now := time.Now()
@@ -188,6 +195,7 @@ func (s *PostStore) Create(p *Post) error {
 	p.FirstPublishedAt = r.FirstPublishedAt
 	p.CreatedAt = r.CreatedAt
 	p.UpdatedAt = r.UpdatedAt
+	p.ContentUpdatedAt = r.ContentUpdatedAt
 	return nil
 }
 
@@ -199,27 +207,12 @@ func (s *PostStore) Update(p *Post) error {
 	if err != nil {
 		return err
 	}
-	r := dbPost{ID: uint(p.ID)}
-	return s.db.Transaction(func(tx *gorm.DB) error {
-		fields := map[string]any{
-			"slug":      p.Slug,
-			"title":     p.Title,
-			"body":      p.Body,
-			"published": p.Published,
-		}
-		if p.Published {
-			// Set once, on the first publish; later publishes keep it.
-			fields["first_published_at"] = gorm.Expr("COALESCE(first_published_at, ?)", time.Now())
-		}
-		res := tx.Model(&r).Where("site_id = ?", s.siteID).Updates(fields)
-		if res.Error != nil {
-			return s.slugTaken(res.Error, p.Slug)
-		}
-		if res.RowsAffected == 0 {
-			return fmt.Errorf("post %d not found in site %d", p.ID, s.siteID)
-		}
-		return tx.Model(&r).Association("Tags").Replace(tags)
-	})
+	fields := map[string]any{"published": p.Published}
+	if p.Published {
+		// Set once, on the first publish; later publishes keep it.
+		fields["first_published_at"] = gorm.Expr("COALESCE(first_published_at, ?)", time.Now())
+	}
+	return s.writePost(p, tags, fields, false)
 }
 
 // ErrLiveOnce: UpdateDraft found the post already published once.
@@ -231,8 +224,8 @@ var ErrLiveOnce = errors.New("post has been published")
 func (s *PostStore) UpdateContent(p *Post) error { return s.updateContent(p, false) }
 
 // UpdateDraft is UpdateContent for someone who may only edit
-// never-published drafts. The check is part of the write, so a post
-// published a moment earlier is left alone (ErrLiveOnce).
+// never-published drafts. The check is made under the post's row lock, so
+// a post published a moment earlier is left alone (ErrLiveOnce).
 func (s *PostStore) UpdateDraft(p *Post) error { return s.updateContent(p, true) }
 
 func (s *PostStore) updateContent(p *Post, draftOnly bool) error {
@@ -243,26 +236,49 @@ func (s *PostStore) updateContent(p *Post, draftOnly bool) error {
 	if err != nil {
 		return err
 	}
-	r := dbPost{ID: uint(p.ID)}
+	return s.writePost(p, tags, map[string]any{}, draftOnly)
+}
+
+// writePost saves p's slug, title, body and tags, plus fields, in one
+// transaction holding the post's row lock. content_updated_at moves only
+// if the title, body or tags actually change. draftOnly refuses a post
+// that has been live (ErrLiveOnce).
+func (s *PostStore) writePost(p *Post, tags []dbTag, fields map[string]any, draftOnly bool) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		q := tx.Model(&r).Where("site_id = ?", s.siteID)
-		if draftOnly {
-			q = q.Where("first_published_at IS NULL")
+		cur, err := s.lockPostInSite(tx, p.ID)
+		if err != nil {
+			return err
 		}
-		res := q.Updates(map[string]any{"slug": p.Slug, "title": p.Title, "body": p.Body})
-		if res.Error != nil {
-			return s.slugTaken(res.Error, p.Slug)
+		if draftOnly && cur.FirstPublishedAt != nil {
+			return ErrLiveOnce
 		}
-		if res.RowsAffected == 0 {
-			if draftOnly {
-				if _, err := s.lockPostInSite(tx, p.ID); err == nil {
-					return ErrLiveOnce
-				}
-			}
-			return fmt.Errorf("post %d not found in site %d", p.ID, s.siteID)
+		var curTags []dbTag
+		if err := tx.Model(cur).Association("Tags").Find(&curTags); err != nil {
+			return err
 		}
-		return tx.Model(&r).Association("Tags").Replace(tags)
+		fields["slug"], fields["title"], fields["body"] = p.Slug, p.Title, p.Body
+		if cur.Title != p.Title || cur.Body != p.Body || !sameTags(curTags, tags) {
+			fields["content_updated_at"] = dbNow()
+		}
+		target := dbPost{ID: cur.ID}
+		if err := tx.Model(&target).Updates(fields).Error; err != nil {
+			return s.slugTaken(err, p.Slug)
+		}
+		return tx.Model(&target).Association("Tags").Replace(tags)
 	})
+}
+
+// sameTags reports whether a and b hold the same tags, in any order.
+func sameTags(a, b []dbTag) bool {
+	ids := func(ts []dbTag) []uint {
+		out := make([]uint, len(ts))
+		for i, t := range ts {
+			out[i] = t.ID
+		}
+		slices.Sort(out)
+		return slices.Compact(out)
+	}
+	return slices.Equal(ids(a), ids(b))
 }
 
 func (s *PostStore) Delete(id int64) error {
@@ -374,6 +390,8 @@ func toPost(r dbPost) Post {
 		Published: r.Published,
 		CreatedAt: r.CreatedAt,
 		UpdatedAt: r.UpdatedAt,
+
+		ContentUpdatedAt: r.ContentUpdatedAt,
 
 		FirstPublishedAt: r.FirstPublishedAt,
 		AuthorID:         r.AuthorID,

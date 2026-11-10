@@ -127,8 +127,9 @@ by side:
   stays unpublished.
 - **Discard** throws the pending changes away.
 
-If someone edited the post directly after the contributor started editing, the
-page warns that publishing will overwrite those edits, and the button becomes
+If someone edited the post's title, body or tags after the contributor started
+editing, the page warns that publishing will overwrite those edits (publishing,
+unpublishing or renaming the slug doesn't count), and the button becomes
 **publish anyway**. If the contributor saves again while you have the page open,
 or someone edits the post again, publishing stops and shows you the newer
 version instead, so you never publish over, or publish, text you haven't seen.

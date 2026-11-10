@@ -170,7 +170,7 @@ func (h *Handler) editor(w http.ResponseWriter, r *http.Request, site *models.Si
 	// Base is the post as this editor shows it. A save that turns into
 	// pending changes -- including a draft published while it was open --
 	// compares against it to warn the reviewer.
-	data["Base"] = post.UpdatedAt.Format(time.RFC3339Nano)
+	data["Base"] = post.ContentUpdatedAt.Format(time.RFC3339Nano)
 	if authz.SavesAsPending(a, post) {
 		data["Mode"] = "pending"
 		if rev != nil {
@@ -293,7 +293,7 @@ func (h *Handler) UpdatePost(w http.ResponseWriter, r *http.Request) {
 			updated.Published = existing.Published
 		}
 		if err != nil {
-			updated.AuthorID, updated.FirstPublishedAt, updated.UpdatedAt = existing.AuthorID, existing.FirstPublishedAt, existing.UpdatedAt
+			updated.AuthorID, updated.FirstPublishedAt, updated.UpdatedAt, updated.ContentUpdatedAt = existing.AuthorID, existing.FirstPublishedAt, existing.UpdatedAt, existing.ContentUpdatedAt
 			h.editor(w, r, site, updated, err.Error())
 			return
 		}

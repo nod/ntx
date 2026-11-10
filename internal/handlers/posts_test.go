@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nod/ntx/internal/models"
 )
@@ -206,7 +207,7 @@ func TestEditorPendingNotices(t *testing.T) {
 	me := e.member("me@x.io", models.RoleContributor, false)
 	p := e.authored(me, "live", true)
 	p, _ = e.posts.ForSite(e.siteA.ID).GetByID(p.ID)
-	if _, err := e.posts.ForSite(e.siteA.ID).SavePending(p.ID, me.ID, "Pending", "b", nil, p.UpdatedAt); err != nil {
+	if _, err := e.posts.ForSite(e.siteA.ID).SavePending(p.ID, me.ID, "Pending", "b", nil, p.ContentUpdatedAt); err != nil {
 		t.Fatal(err)
 	}
 	editPath := "/admin/posts/" + itoa(p.ID) + "/edit"
@@ -342,5 +343,22 @@ func TestPostListStatuses(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("post list lacks %q", want)
 		}
+	}
+}
+
+// An editor shown again after a refused save still carries the post's
+// version, or a later pending save from it would read as stale.
+func TestEditorAfterErrorKeepsBase(t *testing.T) {
+	e := newEnv(t)
+	me := e.member("me@x.io", models.RoleContributor, true)
+	e.authored(me, "taken", true)
+	p := e.authored(me, "mine", true)
+	rec := e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(p.ID), postForm("T", "taken", "save"), e.sessionFor(me))
+	if rec.Code != http.StatusOK || !strings.Contains(text(rec), "already uses the slug") {
+		t.Fatalf("duplicate slug save: %d %s", rec.Code, text(rec))
+	}
+	post, _ := e.posts.ForSite(e.siteA.ID).GetByID(p.ID)
+	if got, want := editorBase(t, rec), post.ContentUpdatedAt.Format(time.RFC3339Nano); got != want {
+		t.Errorf("editor base after an error = %s, want %s", got, want)
 	}
 }

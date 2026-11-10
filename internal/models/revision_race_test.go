@@ -15,7 +15,7 @@ func pendingFixture(t *testing.T) (*peopleFixture, *PostStore, *User, *Post, *Re
 	u := f.person(t, "w@x.io")
 	ps := NewPostStore(f.db).ForSite(f.a.ID)
 	p := livePost(t, ps, u, "live", true)
-	if _, err := ps.SavePending(p.ID, u.ID, "Pending", "pb", nil, p.UpdatedAt); err != nil {
+	if _, err := ps.SavePending(p.ID, u.ID, "Pending", "pb", nil, p.ContentUpdatedAt); err != nil {
 		t.Fatal(err)
 	}
 	return f, ps, u, p, mustPending(t, ps, p.ID)
@@ -26,8 +26,9 @@ func pendingFixture(t *testing.T) (*peopleFixture, *PostStore, *User, *Post, *Re
 func TestPublishPendingWaitsForDirectEdit(t *testing.T) {
 	f, ps, _, p, r := pendingFixture(t)
 	tx := begin(t, f.db)
-	if err := tx.Exec("UPDATE posts SET title = 'Direct edit', updated_at = ? WHERE id = ?",
-		p.UpdatedAt.Add(time.Second), p.ID).Error; err != nil {
+	later := p.ContentUpdatedAt.Add(time.Second)
+	if err := tx.Exec("UPDATE posts SET title = 'Direct edit', updated_at = ?, content_updated_at = ? WHERE id = ?",
+		later, later, p.ID).Error; err != nil {
 		t.Fatal(err)
 	}
 	err := whileOpen(t, tx, true, func() error { return ps.PublishPending(p.ID, r.UpdatedAt, time.Time{}) })
@@ -83,15 +84,16 @@ func TestSavePendingDuringPublishIsKept(t *testing.T) {
 	f, ps, u, p, _ := pendingFixture(t)
 	tx := begin(t, f.db)
 	// What PublishPending writes: the post, then the revision gone.
-	if err := tx.Exec("UPDATE posts SET title = 'Pending', updated_at = ? WHERE id = ?",
-		p.UpdatedAt.Add(time.Second), p.ID).Error; err != nil {
+	later := p.ContentUpdatedAt.Add(time.Second)
+	if err := tx.Exec("UPDATE posts SET title = 'Pending', updated_at = ?, content_updated_at = ? WHERE id = ?",
+		later, later, p.ID).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Exec("DELETE FROM post_revisions WHERE post_id = ?", p.ID).Error; err != nil {
 		t.Fatal(err)
 	}
 	err := whileOpen(t, tx, true, func() error {
-		_, err := ps.SavePending(p.ID, u.ID, "Second", "sb", nil, p.UpdatedAt)
+		_, err := ps.SavePending(p.ID, u.ID, "Second", "sb", nil, p.ContentUpdatedAt)
 		return err
 	})
 	if err != nil {
@@ -113,7 +115,7 @@ func TestSimultaneousFirstSaves(t *testing.T) {
 	// Another first save, in flight: it is rolled back, leaving the two
 	// below to race for the post's only revision.
 	tx := begin(t, f.db)
-	now := revisionNow()
+	now := dbNow()
 	if err := tx.Create(&dbRevision{PostID: p.ID, Title: "x", Tags: "[]", BaseUpdatedAt: p.UpdatedAt, CreatedAt: now, UpdatedAt: now}).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +123,7 @@ func TestSimultaneousFirstSaves(t *testing.T) {
 		errs := make(chan error, 2)
 		for _, title := range []string{"One", "Two"} {
 			go func() {
-				_, err := ps.SavePending(p.ID, u.ID, title, "b", nil, p.UpdatedAt)
+				_, err := ps.SavePending(p.ID, u.ID, title, "b", nil, p.ContentUpdatedAt)
 				errs <- err
 			}()
 		}
@@ -153,7 +155,7 @@ func TestPublishesWithNewTagsInOppositeOrder(t *testing.T) {
 		var ids [2]int64
 		for i, tags := range [][]string{names, reversed} {
 			p := livePost(t, ps, u, fmt.Sprintf("r%d-p%d", round, i), true)
-			if _, err := ps.SavePending(p.ID, u.ID, "New", "b", tags, p.UpdatedAt); err != nil {
+			if _, err := ps.SavePending(p.ID, u.ID, "New", "b", tags, p.ContentUpdatedAt); err != nil {
 				t.Fatal(err)
 			}
 			ids[i], seen[i] = p.ID, mustPending(t, ps, p.ID).UpdatedAt

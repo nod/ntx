@@ -14,7 +14,7 @@ import (
 )
 
 // pending stores u's pending changes on post (re-read, so the base is the
-// stored UpdatedAt) and returns the revision as stored.
+// stored ContentUpdatedAt) and returns the revision as stored.
 func (e *env) pending(siteID int64, u *models.User, post *models.Post, title string, tags ...string) *models.Revision {
 	e.t.Helper()
 	ps := e.posts.ForSite(siteID)
@@ -22,7 +22,7 @@ func (e *env) pending(siteID int64, u *models.User, post *models.Post, title str
 	if err != nil || p == nil {
 		e.t.Fatalf("GetByID: %v %v", p, err)
 	}
-	if _, err := ps.SavePending(p.ID, u.ID, title, "pending body", tags, p.UpdatedAt); err != nil {
+	if _, err := ps.SavePending(p.ID, u.ID, title, "pending body", tags, p.ContentUpdatedAt); err != nil {
 		e.t.Fatal(err)
 	}
 	rev, err := ps.GetPending(p.ID)
@@ -358,7 +358,7 @@ func TestPublishAnywayRefusalShowsCurrentPost(t *testing.T) {
 	confirm := pageConfirm(t, e.do(http.MethodGet, hostA, pendingPath(p, ""), nil, admin))
 
 	tx := e.db.Begin()
-	if err := tx.Exec("UPDATE posts SET title = 'In flight', updated_at = ? WHERE id = ?", time.Now().Add(time.Second), p.ID).Error; err != nil {
+	if err := tx.Exec("UPDATE posts SET title = 'In flight', updated_at = ?, content_updated_at = ? WHERE id = ?", time.Now().Add(time.Second), time.Now().Add(time.Second), p.ID).Error; err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan *httptest.ResponseRecorder, 1)
@@ -374,10 +374,50 @@ func TestPublishAnywayRefusalShowsCurrentPost(t *testing.T) {
 		t.Fatalf("publish anyway over an in-flight edit: %d %s", rec.Code, text(rec))
 	}
 	post, _ := e.posts.ForSite(e.siteA.ID).GetByID(p.ID)
-	if got, want := pageConfirm(t, rec), post.UpdatedAt.Format(time.RFC3339Nano); got != want {
+	if got, want := pageConfirm(t, rec), post.ContentUpdatedAt.Format(time.RFC3339Nano); got != want {
 		t.Errorf("refusal page offers to overwrite %s, want the current version %s", got, want)
 	}
 	if !strings.Contains(text(rec), "In flight") {
 		t.Errorf("refusal page doesn't show the current post: %s", text(rec))
+	}
+}
+
+// Publishing, unpublishing, or saving without changes leaves a post's
+// content as it was, so pending changes started before it aren't stale;
+// a real content edit still makes them stale.
+func TestOnlyContentEditsMakePendingStale(t *testing.T) {
+	e := newEnv(t)
+	me := e.member("me@x.io", models.RoleContributor, false)
+	p := e.authored(me, "live", true)
+	c := e.sessionFor(me)
+	admin := e.siteAdminCookie()
+	path := "/admin/posts/" + itoa(p.ID)
+	edit := e.do(http.MethodGet, hostA, path+"/edit", nil, c)
+	if edit.Code != http.StatusOK {
+		t.Fatalf("editor: %d", edit.Code)
+	}
+	f := postForm("Reworded", "live", "save")
+	f.Set("base", editorBase(t, edit))
+	if rec := e.do(http.MethodPost, hostA, path, f, c); rec.Code != http.StatusSeeOther {
+		t.Fatalf("pending save: %d", rec.Code)
+	}
+	unchanged := func(action string) url.Values {
+		return url.Values{"title": {p.Title}, "slug": {p.Slug}, "body": {p.Body}, "tags": {""}, "action": {action}}
+	}
+	for _, action := range []string{"unpublish", "publish", "save"} {
+		if rec := e.do(http.MethodPost, hostA, path, unchanged(action), admin); rec.Code != http.StatusSeeOther {
+			t.Fatalf("admin %s: %d", action, rec.Code)
+		}
+		if body := text(e.do(http.MethodGet, hostA, pendingPath(p, ""), nil, admin)); strings.Contains(body, "This post was edited after") {
+			t.Fatalf("after an admin %s without content changes, the pending changes show as stale", action)
+		}
+	}
+	changed := unchanged("save")
+	changed.Set("tags", "new-tag")
+	if rec := e.do(http.MethodPost, hostA, path, changed, admin); rec.Code != http.StatusSeeOther {
+		t.Fatalf("admin tag edit: %d", rec.Code)
+	}
+	if body := text(e.do(http.MethodGet, hostA, pendingPath(p, ""), nil, admin)); !strings.Contains(body, "This post was edited after") {
+		t.Fatal("after an admin tag edit, the pending changes should be stale")
 	}
 }
