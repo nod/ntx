@@ -5,10 +5,36 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nod/ntx/internal/models"
 	"github.com/nod/ntx/internal/secretbox"
 )
+
+// Adding a membership from the platform users page cancels the person's
+// pending invite to that site, as the site's members page does.
+func TestPlatformAddMembershipCancelsInvite(t *testing.T) {
+	e := newEnv(t)
+	now := time.Now()
+	u, err := e.users.FindOrCreateByEmail("m@x.io")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, token, err := e.invites.Create(e.siteA.ID, "m@x.io", models.RoleContributor, false, 0, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/admin/platform/users/" + itoa(u.ID) + "/memberships"
+	if rec := e.do(http.MethodPost, platformHost, path, url.Values{"site": {e.siteA.Key}, "role": {"admin"}}, e.login(platformHost)); rec.Code != http.StatusSeeOther {
+		t.Fatalf("add membership: %d %s", rec.Code, rec.Body.String())
+	}
+	if p, _ := e.invites.ListPending(e.siteA.ID, now); len(p) != 0 {
+		t.Fatalf("pending invites after the add: %+v", p)
+	}
+	if rec := e.do(http.MethodGet, hostA, "/invite/"+token, nil, nil); rec.Code == http.StatusOK {
+		t.Error("the invite link still works")
+	}
+}
 
 func siteForm(s *models.Site, extra url.Values) url.Values {
 	f := url.Values{

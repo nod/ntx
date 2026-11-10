@@ -38,7 +38,7 @@ internal/
   models/revision.go           # PostStore pending revisions: save, publish (stale check), discard
   secretbox/secretbox.go       # AES-256-GCM for provider client secrets
   sso/                         # OIDC client (go-oidc), signed ntx_oauth flow state; ssotest = fake provider
-  people/people.go             # sign-in policy (invite → identity → email match → membership), AddMember
+  people/people.go             # sign-in policy (invite → identity → email match → membership), AddMember/AddMembership (also cancel the pending invite)
   authz/authz.go               # the role table: every permission check
   clientip/clientip.go         # real client IP / scheme, believing X-Forwarded-* only from trusted_proxies
   auth/auth.go                 # Manager (Login/Logout/Middleware), Actor, RootDigest, bcrypt helpers

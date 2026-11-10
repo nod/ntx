@@ -162,7 +162,7 @@ func (h *Handler) PlatformAddMembership(w http.ResponseWriter, r *http.Request) 
 		h.userPage(w, r, u, "pick a site from the list")
 		return
 	}
-	h.userResult(w, r, u, h.d.Memberships.Add(u.ID, site.ID, r.FormValue("role"), r.FormValue("can_publish") == "on"))
+	h.userResult(w, r, u, h.d.People.AddMembership(u, site.ID, r.FormValue("role"), r.FormValue("can_publish") == "on"))
 }
 
 func (h *Handler) PlatformRemoveMembership(w http.ResponseWriter, r *http.Request) {
