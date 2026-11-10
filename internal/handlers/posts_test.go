@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nod/ntx/internal/db/dbtest"
 	"github.com/nod/ntx/internal/models"
 )
 
@@ -441,7 +442,7 @@ func TestDraftDeleteDuringPublishKeepsPost(t *testing.T) {
 	go func() {
 		done <- e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(d.ID), url.Values{"action": {"delete"}}, e.sessionFor(me))
 	}()
-	time.Sleep(200 * time.Millisecond)
+	dbtest.AwaitBlocked(t, tx)
 	if err := tx.Commit().Error; err != nil {
 		t.Fatal(err)
 	}

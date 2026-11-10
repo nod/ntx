@@ -7,9 +7,11 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"net/url"
 	"os"
 	"testing"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"gorm.io/gorm"
@@ -76,4 +78,45 @@ func Schema(t testing.TB) string {
 	q.Set("search_path", name)
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+// AwaitBlocked returns once another connection is waiting on a lock that
+// tx holds, and fails t if none is within 10 seconds. Race tests call it
+// between starting a request and ending tx, so the request is known to
+// have run into tx rather than having been too slow to reach it. On SQLite
+// it returns at once: with one connection, the request simply runs after
+// tx ends.
+func AwaitBlocked(t testing.TB, tx *gorm.DB) {
+	t.Helper()
+	if err := awaitBlocked(tx, 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func awaitBlocked(tx *gorm.DB, within time.Duration) error {
+	if tx.Dialector.Name() != "postgres" {
+		return nil
+	}
+	var pid int
+	if err := tx.Raw("SELECT pg_backend_pid()").Scan(&pid).Error; err != nil {
+		return err
+	}
+	// A connection of its own: tx's is busy holding the locks, and the
+	// pool may be busy with the waiter.
+	watch, err := sql.Open("pgx", os.Getenv(EnvDSN))
+	if err != nil {
+		return err
+	}
+	defer watch.Close()
+	for deadline := time.Now().Add(within); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		var waiting bool
+		err := watch.QueryRow("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))", pid).Scan(&waiting)
+		if err != nil {
+			return err
+		}
+		if waiting {
+			return nil
+		}
+	}
+	return fmt.Errorf("nothing waited on the open transaction within %v", within)
 }
