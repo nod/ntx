@@ -253,6 +253,12 @@ Posts are written in Markdown (CommonMark + GitHub Flavored Markdown). Raw HTML
 in post bodies is stripped for safety. Sign in on a site's hostname and use
 **posts**; each site's admin shows only its own posts.
 
+If someone else changes a post's title, body or tags while you have it open
+(another editor, or pending changes being published), your save is refused
+instead of silently replacing their work. The editor comes back with your
+version and nothing saved; saving again from that page replaces their changes
+with yours.
+
 ## Content sections
 
 Sections are URL namespaces backed by theme templates. Each section maps a slug

@@ -218,6 +218,10 @@ func (s *PostStore) Update(p *Post) error {
 // ErrLiveOnce: UpdateDraft found the post already published once.
 var ErrLiveOnce = errors.New("post has been published")
 
+// ErrEditConflict: the post's content changed since the edit started (see
+// writePost).
+var ErrEditConflict = errors.New("post was changed since the edit started")
+
 // UpdateContent saves a post's slug, title, body and tags, leaving its
 // published state alone: a plain save must never publish or unpublish,
 // whatever the caller read earlier.
@@ -242,7 +246,10 @@ func (s *PostStore) updateContent(p *Post, draftOnly bool) error {
 // writePost saves p's slug, title, body and tags, plus fields, in one
 // transaction holding the post's row lock. content_updated_at moves only
 // if the title, body or tags actually change. draftOnly refuses a post
-// that has been live (ErrLiveOnce).
+// that has been live (ErrLiveOnce). If p.ContentUpdatedAt is set, it is
+// the content version the edit started from: if the post's content has
+// changed since, nothing is written (ErrEditConflict). Zero skips the
+// check. On success p.ContentUpdatedAt is the post's new content version.
 func (s *PostStore) writePost(p *Post, tags []dbTag, fields map[string]any, draftOnly bool) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		cur, err := s.lockPostInSite(tx, p.ID)
@@ -252,19 +259,28 @@ func (s *PostStore) writePost(p *Post, tags []dbTag, fields map[string]any, draf
 		if draftOnly && cur.FirstPublishedAt != nil {
 			return ErrLiveOnce
 		}
+		if !p.ContentUpdatedAt.IsZero() && !cur.ContentUpdatedAt.Equal(p.ContentUpdatedAt) {
+			return ErrEditConflict
+		}
+		version := cur.ContentUpdatedAt
 		var curTags []dbTag
 		if err := tx.Model(cur).Association("Tags").Find(&curTags); err != nil {
 			return err
 		}
 		fields["slug"], fields["title"], fields["body"] = p.Slug, p.Title, p.Body
 		if cur.Title != p.Title || cur.Body != p.Body || !sameTags(curTags, tags) {
-			fields["content_updated_at"] = dbNow()
+			version = dbNow()
+			fields["content_updated_at"] = version
 		}
 		target := dbPost{ID: cur.ID}
 		if err := tx.Model(&target).Updates(fields).Error; err != nil {
 			return s.slugTaken(err, p.Slug)
 		}
-		return tx.Model(&target).Association("Tags").Replace(tags)
+		if err := tx.Model(&target).Association("Tags").Replace(tags); err != nil {
+			return err
+		}
+		p.ContentUpdatedAt = version
+		return nil
 	})
 }
 
