@@ -6,6 +6,10 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"gorm.io/gorm"
+
+	"github.com/nod/ntx/internal/db/dbtest"
 )
 
 // pendingFixture: a contributor's live post on site A with pending changes.
@@ -167,5 +171,83 @@ func TestPublishesWithNewTagsInOppositeOrder(t *testing.T) {
 		if err := errors.Join(<-errs, <-errs); err != nil {
 			t.Fatalf("round %d: %v", round, err)
 		}
+	}
+}
+
+// Deleting someone (or a site) while a post write of theirs is in flight
+// must let both finish, one after the other, not deadlock (#27). Another
+// request holds the post, so the write and the delete both queue behind
+// it, and ending it releases them together. SQLite runs them in sequence,
+// in whichever order they reach its one connection, so these are
+// Postgres-only.
+func skipOnSQLite(t *testing.T, d *gorm.DB) {
+	t.Helper()
+	if d.Dialector.Name() != "postgres" {
+		t.Skip("needs two connections")
+	}
+}
+
+func TestDeleteAuthorWhileSavingPending(t *testing.T) {
+	f := newPeople(t)
+	skipOnSQLite(t, f.db)
+	u := f.person(t, "w@x.io")
+	ps := NewPostStore(f.db).ForSite(f.a.ID)
+	p := livePost(t, ps, u, "live", true)
+
+	tx := begin(t, f.db)
+	mustExec(t, tx.Model(&dbPost{}).Where("id = ?", p.ID).Update("slug", "held"))
+	saved := make(chan error, 1)
+	go func() {
+		_, err := ps.SavePending(p.ID, u.ID, "Mine", "b", nil, p.ContentUpdatedAt)
+		saved <- err
+	}()
+	dbtest.AwaitBlockedN(t, tx, 1)
+	deleted := make(chan error, 1)
+	go func() { deleted <- f.users.Delete(u.ID) }()
+	dbtest.AwaitBlockedN(t, tx, 2)
+	mustExec(t, tx.Commit())
+
+	if err := <-saved; err != nil {
+		t.Errorf("SavePending: %v", err)
+	}
+	if err := <-deleted; err != nil {
+		t.Errorf("Delete: %v", err)
+	}
+	if got, _ := f.users.GetByID(u.ID); got != nil {
+		t.Errorf("the person is still there")
+	}
+}
+
+func TestDeleteSiteWhilePublishingNewTag(t *testing.T) {
+	f := newPeople(t)
+	skipOnSQLite(t, f.db)
+	u := f.person(t, "w@x.io")
+	ps := NewPostStore(f.db).ForSite(f.a.ID)
+	p := livePost(t, ps, u, "live", true)
+	rev, err := ps.SavePending(p.ID, u.ID, "Tagged", "b", []string{"fresh"}, p.ContentUpdatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tx := begin(t, f.db)
+	mustExec(t, tx.Model(&dbPost{}).Where("id = ?", p.ID).Update("slug", "held"))
+	published := make(chan error, 1)
+	go func() { published <- ps.PublishPending(p.ID, rev.UpdatedAt, time.Time{}) }()
+	dbtest.AwaitBlockedN(t, tx, 1)
+	deleted := make(chan error, 1)
+	go func() { deleted <- f.sites.Delete(f.a.ID) }()
+	dbtest.AwaitBlockedN(t, tx, 2)
+	mustExec(t, tx.Commit())
+
+	if err := <-published; err != nil {
+		t.Errorf("PublishPending: %v", err)
+	}
+	if err := <-deleted; err != nil {
+		t.Errorf("Delete: %v", err)
+	}
+	var left int64
+	mustExec(t, f.db.Model(&dbSite{}).Where("id = ?", f.a.ID).Count(&left))
+	if left != 0 {
+		t.Errorf("the site is still there")
 	}
 }

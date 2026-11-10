@@ -83,7 +83,20 @@ func toRevision(r dbRevision) (*Revision, error) {
 // a time, and a direct edit of the post (which updates the row) cannot land
 // between a publish's stale check and its copy. SQLite has no row locks;
 // its single connection already runs transactions one at a time.
+//
+// It first takes a key-share lock on the site's row, which keeps the site
+// from being deleted until tx ends. A write under the post lock that adds a
+// row pointing at the site (a new tag) needs that lock anyway; taken late,
+// it can deadlock with a site delete, which locks the site and then waits
+// on the post. Taken first, the delete simply waits. Locks are always
+// taken in the order person, site, post.
 func (s *PostStore) lockPostInSite(tx *gorm.DB, postID int64) (*dbPost, error) {
+	if err := keyShare(tx, &dbSite{}, s.siteID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("post %d not found in site %d", postID, s.siteID)
+		}
+		return nil, err
+	}
 	var p dbPost
 	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("site_id = ?", s.siteID).First(&p, postID).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -93,6 +106,21 @@ func (s *PostStore) lockPostInSite(tx *gorm.DB, postID int64) (*dbPost, error) {
 		return nil, err
 	}
 	return &p, nil
+}
+
+// keyShare locks the row of model with this id against being deleted (or
+// its key changed) until tx ends, and returns gorm.ErrRecordNotFound if it
+// is already gone. SQLite ignores the lock, as it does every row lock.
+func keyShare(tx *gorm.DB, model any, id int64) error {
+	var ids []int64
+	err := tx.Model(model).Clauses(clause.Locking{Strength: "KEY SHARE"}).Where("id = ?", id).Pluck("id", &ids).Error
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 // pendingOn loads postID's revision through tx, confined to this site;
@@ -152,6 +180,14 @@ func (s *PostStore) SavePending(postID, authorID int64, title, body string, tags
 	}
 	var saved dbRevision
 	err = s.db.Transaction(func(tx *gorm.DB) error {
+		// The revision points at its author: lock that row before the
+		// post (see lockPostInSite), or deleting the author deadlocks.
+		if err := keyShare(tx, &dbUser{}, authorID); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("person %d not found", authorID)
+			}
+			return err
+		}
 		p, err := s.lockPostInSite(tx, postID)
 		if err != nil {
 			return err
