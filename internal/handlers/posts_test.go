@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nod/ntx/internal/models"
 )
@@ -342,5 +343,34 @@ func TestPostListStatuses(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("post list lacks %q", want)
 		}
+	}
+}
+
+// A contributor who may only delete drafts must not delete a post that an
+// admin published while the delete was in flight. On Postgres the publish
+// below commits after the handler read the draft but before the delete
+// ran; on SQLite (one connection) it simply lands first.
+func TestDraftDeleteDuringPublishKeepsPost(t *testing.T) {
+	e := newEnv(t)
+	me := e.member("me@x.io", models.RoleContributor, false)
+	d := e.authored(me, "d", false)
+	tx := e.db.Begin()
+	if err := tx.Exec("UPDATE posts SET published = TRUE, first_published_at = ? WHERE id = ?", time.Now(), d.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(d.ID), url.Values{"action": {"delete"}}, e.sessionFor(me))
+	}()
+	time.Sleep(200 * time.Millisecond)
+	if err := tx.Commit().Error; err != nil {
+		t.Fatal(err)
+	}
+	rec := <-done
+	if post, _ := e.posts.ForSite(e.siteA.ID).GetByID(d.ID); post == nil {
+		t.Fatalf("the published post was deleted (%d)", rec.Code)
+	}
+	if rec.Code == http.StatusSeeOther {
+		t.Errorf("delete reported success on a post it didn't delete")
 	}
 }

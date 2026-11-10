@@ -244,7 +244,16 @@ func (h *Handler) UpdatePost(w http.ResponseWriter, r *http.Request) {
 				h.forbidden(w, r)
 				return
 			}
-			if err := ps.Delete(existing.ID); err != nil {
+			// Someone who may only delete drafts: the check is repeated in
+			// the delete, in case the post went live since it was read.
+			del := ps.Delete
+			if !authz.CanPublishOwn(a) {
+				del = ps.DeleteDraft
+			}
+			if err := del(existing.ID); errors.Is(err, models.ErrLiveOnce) {
+				h.message(w, r, http.StatusConflict, "post is live", "This post was published in the meantime, so only a site admin can delete it now.", "/admin/posts", "back to posts")
+				return
+			} else if err != nil {
 				h.serverError(w, err)
 				return
 			}
