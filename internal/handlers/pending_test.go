@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nod/ntx/internal/db/dbtest"
 	"github.com/nod/ntx/internal/models"
 )
 
@@ -365,7 +366,7 @@ func TestPublishAnywayRefusalShowsCurrentPost(t *testing.T) {
 	go func() {
 		done <- e.do(http.MethodPost, hostA, pendingPath(p, "publish"), revisionForm(rev, confirm), admin)
 	}()
-	time.Sleep(200 * time.Millisecond)
+	dbtest.AwaitBlocked(t, tx)
 	if err := tx.Commit().Error; err != nil {
 		t.Fatal(err)
 	}

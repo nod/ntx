@@ -5,21 +5,24 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+
+	"github.com/nod/ntx/internal/db/dbtest"
 )
 
 // Race tests hold another request's writes open in an uncommitted
 // transaction while a store call runs, then commit or roll them back. On
 // Postgres the call runs alongside the open transaction, as two requests
-// would; on SQLite (one connection) it simply waits for it, so the same
+// would, and the test waits until the call is actually stuck behind it; on
+// SQLite (one connection) the call simply runs after it, so the same
 // expectations hold for both.
 
-// whileOpen starts op, gives it time to run into other's writes, ends
+// whileOpen starts op, waits until it is blocked on other's writes, ends
 // other (commit or rollback), and returns op's result.
 func whileOpen(t *testing.T, other *gorm.DB, commit bool, op func() error) error {
 	t.Helper()
 	done := make(chan error, 1)
 	go func() { done <- op() }()
-	time.Sleep(200 * time.Millisecond)
+	dbtest.AwaitBlocked(t, other)
 	end := other.Rollback
 	if commit {
 		end = other.Commit
