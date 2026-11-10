@@ -31,8 +31,10 @@ jobs:
 
       - run: go vet ./...
 
+      # With the race detector, for data races between goroutines. The
+      # Postgres run below covers races between database transactions.
       - name: Test on SQLite
-        run: go test ./...
+        run: go test -race ./...
 
       # Same suite again: every test that opens a database gets its own
       # schema on this server (internal/db/dbtest).
