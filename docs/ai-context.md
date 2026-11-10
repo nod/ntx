@@ -133,7 +133,7 @@ After any write to sites or sections, call `Registry.Reload()`. ntx is single-in
 
   - for everyone else, a non-nil site and a **current membership** on it (platform admins included), attached as `Actor.Membership`. User, flag and membership are re-read every request, so revocations are immediate.
 - **`Actor`.** `IsRoot()` and `IsPlatform()` are nil-safe. Every other permission is an `authz` function.
-- **SSO.** `/auth/start` (GET, or POST from an invite page) sets the signed `ntx_oauth` cookie (state, nonce, PKCE verifier, site ID, invite; 10 min, `SameSite=Lax`, `Path=/auth`) and redirects to the provider. `/auth/callback` checks the cookie's site and state, exchanges the code, verifies the ID token and `email_verified`, then `people.SignIn`, then `Auth.Login`, and ends on an interstitial page (meta refresh) because the session cookie is `SameSite=Strict`. The callback URL is `https://<hostname>/auth/callback` (dev: request scheme and port). Tests use `sso/ssotest` and `Deps.IssuerFor`.
+- **SSO.** `/auth/start` (GET, or POST from an invite page; the invite token is read only from the POST body, and the request log drops this path's query) sets the signed `ntx_oauth` cookie (state, nonce, PKCE verifier, site ID, invite; 10 min, `SameSite=Lax`, `Path=/auth`) and redirects to the provider. `/auth/callback` checks the cookie's site and state, exchanges the code, verifies the ID token and `email_verified`, then `people.SignIn`, then `Auth.Login`, and ends on an interstitial page (meta refresh) because the session cookie is `SameSite=Strict`. The callback URL is `https://<hostname>/auth/callback` (dev: request scheme and port). Tests use `sso/ssotest` and `Deps.IssuerFor`.
 
 ### Authorization
 

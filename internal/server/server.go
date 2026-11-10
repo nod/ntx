@@ -77,12 +77,14 @@ func requestLog(next http.Handler) http.Handler {
 }
 
 // logPath is the request URI with secrets taken out: invite tokens (in the
-// path) and the provider's code and state (in the callback's query).
+// path), the provider's code and state (in the callback's query), and an
+// invite token wrongly sent in /auth/start's query (it is only read from
+// the POST body, but would still be logged).
 func logPath(r *http.Request) string {
 	switch p := r.URL.EscapedPath(); {
 	case strings.HasPrefix(p, "/invite/"):
 		return "/invite/[redacted]"
-	case p == "/auth/callback":
+	case p == "/auth/callback", p == "/auth/start":
 		return p
 	}
 	return r.URL.RequestURI()

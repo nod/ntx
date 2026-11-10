@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -202,6 +203,32 @@ func TestInviteFlow(t *testing.T) {
 	u, _ := e.users.FindByEmail("new@x.io")
 	if m, _ := e.mems.Get(u.ID, e.siteA.ID); m == nil || m.Role != models.RoleAdmin {
 		t.Fatalf("membership = %+v", m)
+	}
+}
+
+// The invite page posts the token. One in a GET link is ignored, so
+// invite tokens never travel in a URL that ends up in logs or history.
+func TestInviteTokenIgnoredInGetLink(t *testing.T) {
+	e := newEnv(t)
+	_, token, err := e.invites.Create(e.siteA.ID, "new@x.io", models.RoleAdmin, false, 0, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.fake.SetNext(verified("s9", "new@x.io"))
+	start := e.do(http.MethodGet, hostA, "/auth/start?invite="+url.QueryEscape(token), nil, nil)
+	if start.Code != http.StatusFound {
+		t.Fatalf("/auth/start: %d", start.Code)
+	}
+	back, err := url.Parse(e.fake.Authorize(t, start.Header().Get("Location")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := e.doWith(http.MethodGet, hostA, back.RequestURI(), nil, cookieNamed(start, "ntx_oauth"))
+	noSession(t, cookieNamed(rec, "ntx_session"))
+	if u, _ := e.users.FindByEmail("new@x.io"); u != nil {
+		if m, _ := e.mems.Get(u.ID, e.siteA.ID); m != nil {
+			t.Fatalf("a GET link accepted the invite: %+v", m)
+		}
 	}
 }
 
