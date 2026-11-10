@@ -288,6 +288,8 @@ func TestSettingsRejectsBadSectionsJSON(t *testing.T) {
 		"vars not an object": `[{"slug":"x","vars":[1]}]`,
 		"not json":           `not json`,
 		"reserved slug":      `[{"slug":"blog"}]`,
+		"trailing text":      `[{"slug":"x"}] junk`,
+		"two lists":          `[{"slug":"x"}][{"slug":"y"}]`,
 	} {
 		rec := e.do(http.MethodPost, "a.example.com", "/admin/settings", url.Values{"name": {"Changed"}, "sections": {sections}}, c)
 		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `class="error"`) {
