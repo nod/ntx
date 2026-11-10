@@ -294,6 +294,28 @@ func (s *PostStore) Delete(id int64) error {
 	return nil
 }
 
+// DeleteDraft is Delete for someone who may only delete never-published
+// drafts. The check is part of the DELETE, so a post published a moment
+// earlier is left alone (ErrLiveOnce): on Postgres the statement waits for
+// the publish to commit and then re-checks the row.
+func (s *PostStore) DeleteDraft(id int64) error {
+	res := s.db.Where("site_id = ? AND first_published_at IS NULL", s.siteID).Delete(&dbPost{}, id)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		var n int64
+		if err := s.db.Model(&dbPost{}).Where("site_id = ? AND id = ?", s.siteID, id).Count(&n).Error; err != nil {
+			return err
+		}
+		if n > 0 {
+			return ErrLiveOnce
+		}
+		return fmt.Errorf("post %d not found in site %d", id, s.siteID)
+	}
+	return nil
+}
+
 // AllTags lists the site's tags that are attached to at least one published
 // post. It feeds public pages, so a draft's tags must never appear here;
 // admin views count every tag through Stats.
