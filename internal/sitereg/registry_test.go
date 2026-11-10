@@ -71,3 +71,35 @@ func TestRegistryReturnsCopies(t *testing.T) {
 		t.Error("callers must not be able to change the registry's copy")
 	}
 }
+
+// Vars are maps (with nested JSON maps and lists): writing to a copy's
+// vars, at any depth, must not reach the registry's.
+func TestRegistryCopiesVars(t *testing.T) {
+	store := newStore(t)
+	a := create(t, store, "a")
+	vars := func() map[string]any {
+		return map[string]any{"k": "v", "nested": map[string]any{"n": "1"}, "list": []any{"x"}}
+	}
+	if err := store.SetSections(a.ID, []models.Section{{Slug: "s", Vars: vars(), Pages: []models.SectionPage{{Slug: "p", Vars: vars()}}}}); err != nil {
+		t.Fatal(err)
+	}
+	reg, _ := New(store)
+	scribble := func(m map[string]any) {
+		m["k"] = "changed"
+		m["added"] = true
+		m["nested"].(map[string]any)["n"] = "changed"
+		m["list"].([]any)[0] = "changed"
+	}
+	got := reg.ByID(a.ID)
+	scribble(got.Sections[0].Vars)
+	scribble(got.Sections[0].Pages[0].Vars)
+	all := reg.All()
+	scribble(all[0].Sections[0].Vars)
+
+	again := reg.ByHost("a.example.com")
+	for name, m := range map[string]map[string]any{"section": again.Sections[0].Vars, "page": again.Sections[0].Pages[0].Vars} {
+		if m["k"] != "v" || m["added"] != nil || m["nested"].(map[string]any)["n"] != "1" || m["list"].([]any)[0] != "x" {
+			t.Errorf("%s vars changed through a copy: %v", name, m)
+		}
+	}
+}

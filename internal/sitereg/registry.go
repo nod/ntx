@@ -41,13 +41,46 @@ func (r *Registry) Reload() error {
 	return nil
 }
 
-// copySite returns a copy that callers can't use to change the registry.
+// copySite returns a copy that callers can't use to change the registry,
+// down to the vars of every section and page.
 func copySite(s models.Site) *models.Site {
 	s.Sections = append([]models.Section(nil), s.Sections...)
 	for i := range s.Sections {
-		s.Sections[i].Pages = append([]models.SectionPage(nil), s.Sections[i].Pages...)
+		sec := &s.Sections[i]
+		sec.Vars = copyVars(sec.Vars)
+		sec.Pages = append([]models.SectionPage(nil), sec.Pages...)
+		for j := range sec.Pages {
+			sec.Pages[j].Vars = copyVars(sec.Pages[j].Vars)
+		}
 	}
 	return &s
+}
+
+// copyVars deep-copies decoded JSON: maps and lists are copied at every
+// depth; strings, numbers, bools and nil are immutable.
+func copyVars(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = copyValue(v)
+	}
+	return out
+}
+
+func copyValue(v any) any {
+	switch v := v.(type) {
+	case map[string]any:
+		return copyVars(v)
+	case []any:
+		out := make([]any, len(v))
+		for i, e := range v {
+			out[i] = copyValue(e)
+		}
+		return out
+	}
+	return v
 }
 
 // ByHost returns the site for a lowercased, port-free hostname, or nil.
