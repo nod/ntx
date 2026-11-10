@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 
 	"github.com/nod/ntx/internal/auth"
 	"github.com/nod/ntx/internal/db/dbtest"
@@ -54,6 +55,7 @@ func writeTheme(t *testing.T, root, name string) {
 
 type env struct {
 	t        *testing.T
+	db       *gorm.DB
 	h        *Handler
 	reg      *sitereg.Registry
 	sites    *models.SiteStore
@@ -140,7 +142,7 @@ func newEnv(t *testing.T) *env {
 	h.Mount(r)
 
 	return &env{
-		t: t, h: h, reg: reg, sites: sites, posts: models.NewPostStore(d), users: users,
+		t: t, db: d, h: h, reg: reg, sites: sites, posts: models.NewPostStore(d), users: users,
 		mems: mems, ids: ids, invites: invites, sessions: sessions, people: ppl, am: am, fake: fake,
 		themes: themesRoot, router: r, siteA: a, rootPass: "rootpass",
 	}

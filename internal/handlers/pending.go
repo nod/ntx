@@ -38,9 +38,21 @@ func (h *Handler) reviewTarget(w http.ResponseWriter, r *http.Request, site *mod
 }
 
 // pendingPage renders current and pending side by side. notice, if set,
-// explains why the page came back instead of publishing.
+// explains why the page came back instead of publishing. The post is read
+// again here: after a refused publish it may have changed since the request
+// loaded it, and the page's "publish anyway" must name the current version.
 func (h *Handler) pendingPage(w http.ResponseWriter, r *http.Request, site *models.Site, status int, post *models.Post, notice string) {
-	rev, err := h.posts(site).GetPending(post.ID)
+	ps := h.posts(site)
+	post, err := ps.GetByID(post.ID)
+	if err != nil {
+		h.serverError(w, err)
+		return
+	}
+	if post == nil {
+		h.notFound(w)
+		return
+	}
+	rev, err := ps.GetPending(post.ID)
 	if err != nil {
 		h.serverError(w, err)
 		return

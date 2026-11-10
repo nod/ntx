@@ -340,3 +340,44 @@ func TestPublishAnywayRefusesNewerEdit(t *testing.T) {
 		t.Fatalf("publish anyway didn't apply: %+v", post)
 	}
 }
+
+// When "publish anyway" is refused because an edit landed while the request
+// was in flight, the page it shows must carry the post as it is now, or the
+// next click is refused again. On Postgres the edit below commits after the
+// handler read the post but before the publish could lock it; on SQLite
+// (one connection) it simply lands first.
+func TestPublishAnywayRefusalShowsCurrentPost(t *testing.T) {
+	e := newEnv(t)
+	me := e.member("me@x.io", models.RoleContributor, false)
+	p := e.authored(me, "live", true)
+	rev := e.pending(e.siteA.ID, me, p, "Reworded")
+	admin := e.siteAdminCookie()
+	if rec := e.do(http.MethodPost, hostA, "/admin/posts/"+itoa(p.ID), postForm("Admin edit", "live", "save"), admin); rec.Code != http.StatusSeeOther {
+		t.Fatalf("admin edit: %d", rec.Code)
+	}
+	confirm := pageConfirm(t, e.do(http.MethodGet, hostA, pendingPath(p, ""), nil, admin))
+
+	tx := e.db.Begin()
+	if err := tx.Exec("UPDATE posts SET title = 'In flight', updated_at = ? WHERE id = ?", time.Now().Add(time.Second), p.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- e.do(http.MethodPost, hostA, pendingPath(p, "publish"), revisionForm(rev, confirm), admin)
+	}()
+	time.Sleep(200 * time.Millisecond)
+	if err := tx.Commit().Error; err != nil {
+		t.Fatal(err)
+	}
+	rec := <-done
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("publish anyway over an in-flight edit: %d %s", rec.Code, text(rec))
+	}
+	post, _ := e.posts.ForSite(e.siteA.ID).GetByID(p.ID)
+	if got, want := pageConfirm(t, rec), post.UpdatedAt.Format(time.RFC3339Nano); got != want {
+		t.Errorf("refusal page offers to overwrite %s, want the current version %s", got, want)
+	}
+	if !strings.Contains(text(rec), "In flight") {
+		t.Errorf("refusal page doesn't show the current post: %s", text(rec))
+	}
+}
