@@ -76,7 +76,9 @@ be changed, deleted or locked out from the browser. To change it, put a new
 `root_password_hash` in `ntx.toml` and restart; every existing root session ends.
 
 The request log never shows invite tokens (`/invite/[redacted]`) or the
-provider's code (`/auth/callback` is logged without its query).
+provider's code (`/auth/callback` and `/auth/start` are logged without their
+query). An invite is accepted only through the invite page's form, never from
+a token in a link to `/auth/start`.
 
 Sign-in failures are rate-limited per client IP (5 per 15 minutes, shared across
 all hostnames). Successful sign-ins don't count, and behind a reverse proxy the

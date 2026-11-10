@@ -114,7 +114,8 @@ func (h *Handler) AuthStart(w http.ResponseWriter, r *http.Request) {
 			h.providerTrouble(w, r, err)
 			return
 		}
-		flow := sso.NewFlow(site.ID, r.FormValue("invite"), time.Now())
+		// The invite page posts the token: one in a URL would be logged.
+		flow := sso.NewFlow(site.ID, r.PostFormValue("invite"), time.Now())
 		ctx, cancel := h.providerCtx(r)
 		defer cancel()
 		target, err := h.d.SSO.AuthCodeURL(ctx, settings, flow)

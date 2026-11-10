@@ -383,13 +383,14 @@ func TestRequestLogRedactsTokens(t *testing.T) {
 
 	e.do(http.MethodGet, "a.example.com", "/invite/SECRET123", nil, nil, nil)
 	e.do(http.MethodGet, "a.example.com", "/auth/callback?code=CODE9&state=S", nil, nil, nil)
+	e.do(http.MethodGet, "a.example.com", "/auth/start?invite=TOKEN7", nil, nil, nil)
 	out := buf.String()
-	for _, secret := range []string{"SECRET123", "CODE9"} {
+	for _, secret := range []string{"SECRET123", "CODE9", "TOKEN7"} {
 		if strings.Contains(out, secret) {
 			t.Errorf("request log leaks %q: %s", secret, out)
 		}
 	}
-	if !strings.Contains(out, "/invite/[redacted]") || !strings.Contains(out, "/auth/callback ") {
+	if !strings.Contains(out, "/invite/[redacted]") || !strings.Contains(out, "/auth/callback ") || !strings.Contains(out, "/auth/start ") {
 		t.Errorf("request log should still show the redacted paths: %s", out)
 	}
 }
