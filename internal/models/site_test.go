@@ -229,6 +229,50 @@ func TestSetSectionsValidatesAndReplaces(t *testing.T) {
 	}
 }
 
+// The settings page saves a site's fields and its sections together: if
+// either is refused, neither changes.
+func TestSaveSettingsAllOrNothing(t *testing.T) {
+	d := newTestSiteDB(t)
+	s := NewSiteStore(d)
+	a := mustCreateSite(t, s, "a", "a.example.com")
+	if err := s.SetSections(a.ID, []Section{{Slug: "projects"}}); err != nil {
+		t.Fatal(err)
+	}
+	stored := func() Site {
+		t.Helper()
+		sites, err := s.List()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sites[0]
+	}
+
+	badFields := *a
+	badFields.Name, badFields.Hostname = "Changed", testPlatformHost
+	if err := s.SaveSettings(&badFields, []Section{{Slug: "writing"}}, testPlatformHost); !isValidation(err) {
+		t.Fatalf("bad fields: expected *ValidationError, got %v", err)
+	}
+	if got := stored(); got.Name == "Changed" || len(got.Sections) != 1 || got.Sections[0].Slug != "projects" {
+		t.Errorf("refused fields must leave the sections too, got name %q sections %+v", got.Name, got.Sections)
+	}
+
+	goodFields := *a
+	goodFields.Name = "Changed"
+	if err := s.SaveSettings(&goodFields, []Section{{Slug: "blog"}}, testPlatformHost); !isValidation(err) {
+		t.Fatalf("bad sections: expected *ValidationError, got %v", err)
+	}
+	if got := stored(); got.Name == "Changed" {
+		t.Errorf("refused sections must leave the fields too, got name %q", got.Name)
+	}
+
+	if err := s.SaveSettings(&goodFields, []Section{{Slug: "writing"}}, testPlatformHost); err != nil {
+		t.Fatal(err)
+	}
+	if got := stored(); got.Name != "Changed" || len(got.Sections) != 1 || got.Sections[0].Slug != "writing" {
+		t.Errorf("save: got name %q sections %+v", got.Name, got.Sections)
+	}
+}
+
 func TestDeleteCascadesSections(t *testing.T) {
 	d := newTestSiteDB(t)
 	s := NewSiteStore(d)

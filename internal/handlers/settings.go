@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -47,25 +48,18 @@ func (h *Handler) SettingsPost(w http.ResponseWriter, r *http.Request) {
 				fail("sections: not valid JSON for a list of sections: " + err.Error())
 				return
 			}
-		}
-
-		// SetSections validates everything before it writes, so it goes
-		// first; the remaining fields can't fail validation (hostname and
-		// theme are unchanged here).
-		if err := h.d.Sites.SetSections(site.ID, secs); err != nil {
-			var v *models.ValidationError
-			if errors.As(err, &v) {
-				fail(v.Msg)
+			// Decode reads one value; anything after it would be dropped.
+			if _, err := dec.Token(); err != io.EOF {
+				fail("sections: unexpected text after the list of sections")
 				return
 			}
-			h.serverError(w, err)
-			return
 		}
+
 		updated := *site
 		updated.Name = r.FormValue("name")
 		updated.Description = r.FormValue("description")
 		updated.AboutSlug = r.FormValue("about_slug")
-		if err := h.d.Sites.Update(&updated, h.d.PlatformHostname); err != nil {
+		if err := h.d.Sites.SaveSettings(&updated, secs, h.d.PlatformHostname); err != nil {
 			var v *models.ValidationError
 			if errors.As(err, &v) {
 				fail(v.Msg)

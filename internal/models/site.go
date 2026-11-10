@@ -221,8 +221,27 @@ func (s *SiteStore) Create(site *Site, platformHostname string) error {
 // immutable and site.Key is ignored. Changing the hostname deletes the
 // site's sessions: cookies are bound to the old host anyway.
 func (s *SiteStore) Update(site *Site, platformHostname string) error {
+	return updateSite(s.db, site, platformHostname)
+}
+
+// SaveSettings saves a site's editable fields (as Update) and replaces its
+// sections (as SetSections) in one transaction: if either is refused,
+// neither changes.
+func (s *SiteStore) SaveSettings(site *Site, secs []Section, platformHostname string) error {
+	if err := validateSections(secs); err != nil {
+		return err
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := updateSite(tx, site, platformHostname); err != nil {
+			return err
+		}
+		return replaceSections(tx, site.ID, secs)
+	})
+}
+
+func updateSite(d *gorm.DB, site *Site, platformHostname string) error {
 	var cur dbSite
-	if err := s.db.First(&cur, site.ID).Error; err != nil {
+	if err := d.First(&cur, site.ID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return invalid("site %d does not exist", site.ID)
 		}
@@ -231,7 +250,7 @@ func (s *SiteStore) Update(site *Site, platformHostname string) error {
 	site.Key = cur.Key
 	// Read before Updates: GORM writes the new values back into cur.
 	oldHostname := cur.Hostname
-	return retryOnDuplicate(s.db, func(tx *gorm.DB) error {
+	return retryOnDuplicate(d, func(tx *gorm.DB) error {
 		if err := normalizeSite(tx, site, platformHostname, site.ID); err != nil {
 			return err
 		}
@@ -267,6 +286,13 @@ func (s *SiteStore) Delete(id int64) error {
 // SetSections replaces a site's sections and pages. It validates everything
 // before writing, so a rejected set leaves the stored sections untouched.
 func (s *SiteStore) SetSections(siteID int64, secs []Section) error {
+	if err := validateSections(secs); err != nil {
+		return err
+	}
+	return replaceSections(s.db, siteID, secs)
+}
+
+func validateSections(secs []Section) error {
 	seen := map[string]bool{}
 	for _, sec := range secs {
 		if err := validate.SectionSlug(sec.Slug); err != nil {
@@ -287,10 +313,14 @@ func (s *SiteStore) SetSections(siteID int64, secs []Section) error {
 			pageSeen[pg.Slug] = true
 		}
 	}
+	return nil
+}
 
+// replaceSections writes already-validated sections over the site's.
+func replaceSections(d *gorm.DB, siteID int64, secs []Section) error {
 	// A double-submitted save: the retry's delete sees the other request's
 	// sections and replaces them, so the later save wins.
-	return retryOnDuplicate(s.db, func(tx *gorm.DB) error {
+	return retryOnDuplicate(d, func(tx *gorm.DB) error {
 		// section_pages cascade with their sections.
 		if err := tx.Where("site_id = ?", siteID).Delete(&dbSection{}).Error; err != nil {
 			return err
