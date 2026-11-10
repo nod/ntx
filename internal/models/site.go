@@ -284,7 +284,9 @@ func (s *SiteStore) SetSections(siteID int64, secs []Section) error {
 		}
 	}
 
-	return s.db.Transaction(func(tx *gorm.DB) error {
+	// A double-submitted save: the retry's delete sees the other request's
+	// sections and replaces them, so the later save wins.
+	return retryOnDuplicate(s.db, func(tx *gorm.DB) error {
 		// section_pages cascade with their sections.
 		if err := tx.Where("site_id = ?", siteID).Delete(&dbSection{}).Error; err != nil {
 			return err
