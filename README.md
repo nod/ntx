@@ -115,7 +115,7 @@ original host (`proxy_set_header Host $host;`) or nothing will resolve.
 A site's public pages come from a theme: a folder under `themes_path` with
 `templates/` and `static/`. This repo ships `default`, `blog` and `nerdtx` in
 [`themes/`](themes/). Admin pages are built into the binary and aren't themed.
-Set `dev = true` to reload templates from disk on every request.
+Template edits show on the next request; no restart needed.
 
 ## Content sections
 

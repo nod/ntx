@@ -23,74 +23,114 @@ import (
 	"github.com/nod/ntx/internal/themes"
 )
 
+// TemplateCache holds one theme's parsed templates. Every lookup first
+// stamps the templates folder (the name, size and mtime of each .html
+// file) and reparses the theme if the stamp changed, so edits, new pages
+// and deletions on disk show on the next request without a restart.
 type TemplateCache struct {
+	path string
+
+	mu        sync.Mutex
+	stamp     string
 	templates map[string]*template.Template
-	path      string
-	dev       bool
 }
 
-func NewTemplateCache(path string, dev bool) (*TemplateCache, error) {
-	tc := &TemplateCache{path: path, dev: dev}
-	if !dev {
-		if err := tc.load(); err != nil {
-			return nil, err
-		}
-	}
-	return tc, nil
-}
+func NewTemplateCache(path string) *TemplateCache { return &TemplateCache{path: path} }
 
-func (tc *TemplateCache) Has(name string) bool {
-	if tc.dev {
-		_, err := os.Stat(filepath.Join(tc.path, name))
-		return err == nil
+// Has reports whether the theme has template name.
+func (tc *TemplateCache) Has(name string) (bool, error) {
+	ts, err := tc.current()
+	if err != nil {
+		return false, err
 	}
-	_, ok := tc.templates[name]
-	return ok
+	_, ok := ts[name]
+	return ok, nil
 }
 
 func (tc *TemplateCache) Get(name string) (*template.Template, error) {
-	if tc.dev {
-		return tc.parse(name)
+	ts, err := tc.current()
+	if err != nil {
+		return nil, err
 	}
-	t, ok := tc.templates[name]
+	t, ok := ts[name]
 	if !ok {
 		return nil, fmt.Errorf("template %q not found", name)
 	}
 	return t, nil
 }
 
-func (tc *TemplateCache) load() error {
-	tc.templates = make(map[string]*template.Template)
-	base := filepath.Join(tc.path, "base.html")
+// current returns the templates as they are on disk now. The stamp is
+// taken before parsing, so a file changed mid-parse changes the next
+// stamp and is reparsed then. A parse error is returned, not cached: the
+// theme stays an error until the file is fixed.
+func (tc *TemplateCache) current() (map[string]*template.Template, error) {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	stamp, err := tc.stampNow()
+	if err != nil {
+		return nil, err
+	}
+	if tc.templates != nil && stamp == tc.stamp {
+		return tc.templates, nil
+	}
+	ts, err := tc.parseAll()
+	if err != nil {
+		return nil, err
+	}
+	tc.templates, tc.stamp = ts, stamp
+	return ts, nil
+}
 
-	err := filepath.Walk(tc.path, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+// walkHTML calls fn for every .html file under the templates folder, in
+// lexical order. A file that vanishes during the walk (an editor saving
+// by rename) is skipped; a missing folder is an error.
+func (tc *TemplateCache) walkHTML(fn func(rel, path string, info os.FileInfo) error) error {
+	return filepath.Walk(tc.path, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			if path != tc.path && os.IsNotExist(err) {
+				return nil
+			}
 			return err
+		}
+		if info.IsDir() || filepath.Ext(path) != ".html" {
+			return nil
 		}
 		rel, err := filepath.Rel(tc.path, path)
 		if err != nil {
 			return err
 		}
+		return fn(filepath.ToSlash(rel), path, info)
+	})
+}
+
+func (tc *TemplateCache) stampNow() (string, error) {
+	var b strings.Builder
+	err := tc.walkHTML(func(rel, _ string, info os.FileInfo) error {
+		fmt.Fprintf(&b, "%s %d %d\n", rel, info.Size(), info.ModTime().UnixNano())
+		return nil
+	})
+	return b.String(), err
+}
+
+// parseAll parses every page template together with base.html.
+func (tc *TemplateCache) parseAll() (map[string]*template.Template, error) {
+	ts := make(map[string]*template.Template)
+	base := filepath.Join(tc.path, "base.html")
+	err := tc.walkHTML(func(rel, path string, _ os.FileInfo) error {
 		if rel == "base.html" {
-			return nil
-		}
-		if filepath.Ext(path) != ".html" {
 			return nil
 		}
 		t, err := template.New(filepath.Base(base)).Funcs(templateFuncs()).ParseFiles(base, path)
 		if err != nil {
 			return fmt.Errorf("parsing template %s: %w", rel, err)
 		}
-		tc.templates[rel] = t
+		ts[rel] = t
 		return nil
 	})
-	return err
-}
-
-func (tc *TemplateCache) parse(name string) (*template.Template, error) {
-	base := filepath.Join(tc.path, "base.html")
-	page := filepath.Join(tc.path, name)
-	return template.New(filepath.Base(base)).Funcs(templateFuncs()).ParseFiles(base, page)
+	if err != nil {
+		return nil, err
+	}
+	return ts, nil
 }
 
 func templateFuncs() template.FuncMap {
@@ -162,22 +202,20 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, fn func(http.Res
 func (h *Handler) posts(site *models.Site) *models.PostStore { return h.d.Posts.ForSite(site.ID) }
 
 // templates returns the template cache for site's theme. Sites on the same
-// theme share one cache, built on first use.
+// theme share one cache. The theme folder is checked on every call, so a
+// deleted theme stops being served.
 func (h *Handler) templates(site *models.Site) (*TemplateCache, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if tc, ok := h.caches[site.Theme]; ok {
-		return tc, nil
-	}
 	dir, err := themes.Dir(h.d.ThemesPath, site.Theme)
 	if err != nil {
 		return nil, err
 	}
-	tc, err := NewTemplateCache(filepath.Join(dir, "templates"), h.d.Dev)
-	if err != nil {
-		return nil, fmt.Errorf("loading theme %q: %w", site.Theme, err)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	tc, ok := h.caches[site.Theme]
+	if !ok {
+		tc = NewTemplateCache(filepath.Join(dir, "templates"))
+		h.caches[site.Theme] = tc
 	}
-	h.caches[site.Theme] = tc
 	return tc, nil
 }
 
@@ -198,7 +236,7 @@ func (h *Handler) renderToBytes(site *models.Site, name string, data map[string]
 	}
 	t, err := tc.Get(name)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("theme %q: %w", site.Theme, err)
 	}
 	merged := siteData(site)
 	for k, v := range data {

@@ -67,7 +67,7 @@ type Config struct {
     BindAddr         string         // "" = localhost only
     Port             int            // default 8080
     DBDSN            string         // default sqlite://./ntx.db
-    Dev              bool           // re-parse templates per request; cookies without Secure
+    Dev              bool           // cookies without Secure; external URLs use the request's scheme and port
     TrustedProxies   []netip.Prefix // trusted_proxies (CIDRs); default none
     SessionSecret    string         // required, ≥32 chars
     EncryptionKey    []byte         // encryption_key, base64 → exactly 32 bytes; seals provider client secrets
@@ -141,7 +141,7 @@ After any write to sites or sections, call `Registry.Reload()`. ntx is single-in
 
 ## Themes and templates
 
-A theme is `themes_path/<name>/templates/` plus `themes_path/<name>/static/`. Names follow `validate.Key`, and `themes.Dir` refuses anything that isn't a single existing folder, so the browser never supplies a path. Template caches are keyed by theme name and built lazily. In dev mode, templates are parsed per request.
+A theme is `themes_path/<name>/templates/` plus `themes_path/<name>/static/`. Names follow `validate.Key`, and `themes.Dir` refuses anything that isn't a single existing folder, so the browser never supplies a path. Template caches are keyed by theme name. `Handler.templates` re-checks `themes.Dir` on every call. `TemplateCache` stamps `templates/` on every lookup (each `.html` file's path, size and mtime, taken under its mutex before parsing) and reparses the whole theme when the stamp changes. A parse error is returned, not cached. Dev mode does not affect templates. `Has` returns `(bool, error)`, so a broken theme is a 500, not a 404. Handler tests run with `Dev: false`.
 
 Theme layout:
 - `base.html` must exist; every page is parsed with it.

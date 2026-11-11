@@ -76,7 +76,11 @@ func (h *Handler) generateSite(site *models.Site, outDir string) error {
 		for j := range sec.Pages {
 			pg := &sec.Pages[j]
 			tmplName := "sections/" + sec.Slug + "/" + pg.Slug + "/index.html"
-			if !tc.Has(tmplName) {
+			has, err := tc.Has(tmplName)
+			if err != nil {
+				return fmt.Errorf("theme %q: %w", site.Theme, err)
+			}
+			if !has {
 				log.Printf("warning: template %s not found, skipping /%s/%s", tmplName, sec.Slug, pg.Slug)
 				continue
 			}

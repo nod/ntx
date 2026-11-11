@@ -11,7 +11,7 @@ import (
 	"github.com/nod/ntx/internal/models"
 )
 
-var inviteLinkRe = regexp.MustCompile(`http://a\.example\.com/invite/([A-Za-z0-9_-]{20,})`)
+var inviteLinkRe = regexp.MustCompile(`https://a\.example\.com/invite/([A-Za-z0-9_-]{20,})`)
 
 func (e *env) siteAdminCookie() *http.Cookie {
 	e.t.Helper()
