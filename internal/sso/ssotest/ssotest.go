@@ -129,6 +129,14 @@ func writeJSON(w http.ResponseWriter, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+// tokenError answers the token endpoint with an OAuth error, as JSON (RFC
+// 6749 section 5.2). The header must be set before the status is written.
+func tokenError(w http.ResponseWriter, status int, code string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"error": code})
+}
+
 func (p *Provider) discovery(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		"issuer":                                p.URL,
@@ -183,13 +191,11 @@ func (p *Provider) token(w http.ResponseWriter, r *http.Request) {
 	sum := sha256.Sum256([]byte(r.PostForm.Get("code_verifier")))
 	switch {
 	case id != p.ClientID || sec != p.ClientSecret:
-		w.WriteHeader(http.StatusUnauthorized)
-		writeJSON(w, map[string]string{"error": "invalid_client"})
+		tokenError(w, http.StatusUnauthorized, "invalid_client")
 		return
 	case !found || g.clientID != id || g.redirect != r.PostForm.Get("redirect_uri") ||
 		base64.RawURLEncoding.EncodeToString(sum[:]) != g.challenge:
-		w.WriteHeader(http.StatusBadRequest)
-		writeJSON(w, map[string]string{"error": "invalid_grant"})
+		tokenError(w, http.StatusBadRequest, "invalid_grant")
 		return
 	}
 	aud := p.ClientID

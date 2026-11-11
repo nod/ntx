@@ -146,6 +146,36 @@ func TestCallbackProviderError(t *testing.T) {
 	noSession(t, cookieNamed(rec, "ntx_session"))
 }
 
+// A code the provider refuses (here: already used) is an expired sign-in
+// to retry, not an unreachable provider.
+func TestCallbackRejectedCodeIsExpired(t *testing.T) {
+	e := newEnv(t)
+	flow, back := e.startSSO(hostA, verified("s1", "c@x.io"), "")
+	e.doWith(http.MethodGet, hostA, back.RequestURI(), nil, flow)
+	rec := e.doWith(http.MethodGet, hostA, back.RequestURI(), nil, flow)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "Your sign-in expired") {
+		t.Fatalf("reused code: %d %s", rec.Code, rec.Body.String())
+	}
+	noSession(t, cookieNamed(rec, "ntx_session"))
+}
+
+// A client secret the provider refuses points at the site's provider
+// settings, not at the provider being down.
+func TestCallbackRejectedClientNamesSettings(t *testing.T) {
+	e := newEnv(t)
+	flow, back := e.startSSO(hostA, verified("s1", "c@x.io"), "")
+	sealed, _ := secretbox.Seal(testEncKey, "not-the-secret")
+	if err := e.sites.SetProvider(e.siteA.ID, models.ProviderSettings{Type: e.siteA.ProviderType, Domain: e.siteA.ProviderDomain, ClientID: e.fake.ClientID}, sealed); err != nil {
+		t.Fatal(err)
+	}
+	rec := e.doWith(http.MethodGet, hostA, back.RequestURI(), nil, flow)
+	body := rec.Body.String()
+	if rec.Code != http.StatusBadGateway || !strings.Contains(body, "provider settings") || strings.Contains(body, "reach the sign-in provider") {
+		t.Fatalf("rejected client secret: %d %s", rec.Code, body)
+	}
+	noSession(t, cookieNamed(rec, "ntx_session"))
+}
+
 func TestStartProviderUnreachable(t *testing.T) {
 	e := newEnv(t)
 	e.h.d.IssuerFor = func(string, string) string { return "http://127.0.0.1:1" }

@@ -16,8 +16,17 @@ import (
 
 var (
 	// ErrProvider wraps failures talking to the provider: discovery, or the
-	// code exchange. The provider is down, misconfigured, or refused us.
+	// code exchange. The provider is down or answered with something
+	// unusable.
 	ErrProvider = errors.New("sso: sign-in provider error")
+	// ErrCodeRejected: the provider refused the sign-in code (invalid_grant):
+	// it expired, was already used, or doesn't match this flow. Signing in
+	// again gets a fresh one.
+	ErrCodeRejected = errors.New("sso: the provider rejected the sign-in code")
+	// ErrClientRejected: the provider refused this site's client ID or
+	// secret (invalid_client, unauthorized_client). Only fixing the site's
+	// provider settings helps.
+	ErrClientRejected = errors.New("sso: the provider rejected the client credentials")
 	// ErrEmailNotVerified: the provider doesn't vouch for the email, so it
 	// can't be used to match anyone.
 	ErrEmailNotVerified = errors.New("sso: email not verified by the provider")
@@ -113,6 +122,15 @@ func (c *Client) Exchange(ctx context.Context, s Settings, code string, f Flow) 
 	}
 	tok, err := cfg.Exchange(c.ctx(ctx), code, oauth2.VerifierOption(f.Verifier))
 	if err != nil {
+		var re *oauth2.RetrieveError
+		if errors.As(err, &re) {
+			switch re.ErrorCode {
+			case "invalid_grant":
+				return Claims{}, fmt.Errorf("%w: %v", ErrCodeRejected, err)
+			case "invalid_client", "unauthorized_client":
+				return Claims{}, fmt.Errorf("%w: %v", ErrClientRejected, err)
+			}
+		}
 		return Claims{}, fmt.Errorf("%w: code exchange: %v", ErrProvider, err)
 	}
 	raw, ok := tok.Extra("id_token").(string)

@@ -75,6 +75,9 @@ func (h *Handler) providerTrouble(w http.ResponseWriter, r *http.Request, err er
 	case errors.Is(err, errSecret):
 		h.message(w, r, http.StatusBadGateway, "sign-in unavailable",
 			"This site's sign-in provider needs its client secret re-entered by a platform admin.", "", "")
+	case errors.Is(err, sso.ErrClientRejected):
+		h.message(w, r, http.StatusBadGateway, "sign-in unavailable",
+			"The sign-in provider rejected this site's client ID or secret. A platform admin needs to check the site's provider settings.", "", "")
 	case errors.Is(err, sso.ErrProvider):
 		h.message(w, r, http.StatusBadGateway, "sign-in unavailable",
 			"Couldn't reach the sign-in provider. Try again later.", "/admin/login", "back to sign in")
@@ -168,10 +171,11 @@ func (h *Handler) AuthCallback(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, sso.ErrEmailNotVerified):
 			h.noAccess(w, r)
 			return
-		case errors.Is(err, sso.ErrProvider):
+		case errors.Is(err, sso.ErrProvider), errors.Is(err, sso.ErrClientRejected):
 			h.providerTrouble(w, r, err)
 			return
 		case err != nil:
+			// Including ErrCodeRejected: an expired or reused code.
 			log.Printf("sign-in on %s: %v", site.Key, err)
 			h.signInExpired(w, r)
 			return
