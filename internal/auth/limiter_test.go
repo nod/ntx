@@ -76,3 +76,25 @@ func TestLimiterReleaseReturnsBudget(t *testing.T) {
 		t.Error("after the budget of unreleased attempts, Reserve must refuse")
 	}
 }
+
+// An IP that failed once and never came back keeps no entry after its
+// failures leave the window.
+func TestLimiterSweepDropsStaleIPs(t *testing.T) {
+	l := NewLimiter()
+	start := time.Now()
+	l.now = func() time.Time { return start }
+	l.Reserve("old")
+	l.now = func() time.Time { return start.Add(14 * time.Minute) }
+	l.Reserve("new")
+
+	l.now = func() time.Time { return start.Add(limitWindow + time.Second) }
+	if n := l.Sweep(); n != 1 {
+		t.Errorf("Sweep dropped %d IPs, want 1", n)
+	}
+	if _, ok := l.failures["old"]; ok {
+		t.Error("an IP with no failures in the window is still kept")
+	}
+	if got := len(l.failures["new"]); got != 1 {
+		t.Errorf("an IP with a failure in the window has %d, want 1", got)
+	}
+}

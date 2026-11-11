@@ -105,3 +105,10 @@ func (s *SessionStore) Delete(token string) error {
 func (s *SessionStore) DeleteForUser(userID int64) error {
 	return s.db.Where("user_id = ?", userID).Delete(&dbSession{}).Error
 }
+
+// DeleteExpired removes every session expired at now (the rule Lookup
+// uses) and returns how many it removed. serve runs it periodically.
+func (s *SessionStore) DeleteExpired(now time.Time) (int64, error) {
+	res := s.db.Where("expires_at <= ?", now).Delete(&dbSession{})
+	return res.RowsAffected, res.Error
+}

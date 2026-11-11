@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nod/ntx/internal/config"
 	"github.com/nod/ntx/internal/db"
@@ -89,6 +90,39 @@ func TestHashRootPasswordRejectsEmpty(t *testing.T) {
 	hash, err := hashRootPassword("s3cret")
 	if err != nil || !strings.HasPrefix(hash, "$2") {
 		t.Errorf("a real password must hash: %q, %v", hash, err)
+	}
+}
+
+// serve's periodic sweep deletes expired sessions from the app's database
+// and keeps live ones.
+func TestAppSweepDeletesExpiredSessions(t *testing.T) {
+	cfgFile := genConfigFile(t, realBcryptHash)
+	t.Setenv("NTX_DB_DSN", "sqlite://"+filepath.Join(t.TempDir(), "t.db"))
+	t.Setenv("NTX_THEMES_PATH", t.TempDir())
+	a, err := openApp(cfgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(a.close)
+	root, err := a.users.EnsureRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.sessions.Create(root.ID, nil, "d", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	live, err := a.sessions.Create(root.ID, nil, "d", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().Add(2 * time.Minute)
+	a.sweep(now)
+	if n, _ := a.sessions.DeleteExpired(now); n != 0 {
+		t.Errorf("sweep left %d expired sessions", n)
+	}
+	if s, _ := a.sessions.Lookup(live, now); s == nil {
+		t.Error("sweep deleted a live session")
 	}
 }
 
