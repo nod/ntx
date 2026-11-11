@@ -48,7 +48,7 @@ Config is resolved in this order (later wins):
 | `bind_addr` | empty = localhost only; `"0.0.0.0"` for all interfaces |
 | `port` | default 8080 |
 | `db_dsn` | `sqlite://./ntx.db` (default) or a `postgres://` URL; one database for every site |
-| `dev` | re-reads templates on every request; cookies without `Secure` |
+| `dev` | cookies without `Secure`; sign-in URLs use the request's scheme and port |
 | `trusted_proxies` | CIDRs allowed to set `X-Forwarded-For` / `X-Forwarded-Proto` (your reverse proxy); default none |
 | `session_secret` | required, min 32 chars |
 | `encryption_key` | required, 32 random bytes base64-encoded; encrypts stored secrets |
@@ -232,6 +232,12 @@ themes/
 Theme names follow the same rule as site keys. The list in the site form shows
 every folder under `themes_path` that has a `templates/` folder; the browser
 never supplies a path. Sites on the same theme share one parsed template cache.
+
+Theme edits show without a restart. Before each page, ntx checks the theme's
+`templates/` folder (each `.html` file's name, size and modification time) and
+reparses the theme if anything changed. That covers edited, added and deleted
+templates, and a deleted theme folder. A template that fails to parse makes
+that theme's pages a server error (logged) until the file is fixed.
 
 Admin pages (sign-in, posts, settings, sites) are built into the binary and are
 not themed, so they work even if a site's theme is missing or broken.
@@ -424,6 +430,7 @@ server {
 
 ## Dev mode
 
-Set `dev = true` (or `NTX_DEV=true`) to reload theme templates from disk on every
-request, so no restart is needed when editing HTML. Dev mode also drops the
-`Secure` flag from cookies, so sign-in works over plain `http://localhost`.
+Set `dev = true` (or `NTX_DEV=true`) to run over plain `http://localhost`: dev
+mode drops the `Secure` flag from cookies, and sign-in callback and invite URLs
+use the request's scheme and port instead of `https://<hostname>`. Theme edits
+show without a restart in either mode (see [Themes](#themes)).

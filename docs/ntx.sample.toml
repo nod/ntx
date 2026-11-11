@@ -15,7 +15,7 @@
 bind_addr          = ""            # empty = localhost only; "0.0.0.0" listens on all interfaces
 port               = 8080
 db_dsn             = "sqlite://./ntx.db"   # or postgres://user:pass@host/db
-dev                = false         # true: re-read templates on every request; cookies without Secure
+dev                = false         # true: cookies without Secure; sign-in URLs use the request scheme and port
 
 # Requests from these addresses may set X-Forwarded-For / X-Forwarded-Proto.
 # Keep this to your reverse proxy; the default suits a proxy on this machine.

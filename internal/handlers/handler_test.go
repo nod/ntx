@@ -114,7 +114,7 @@ func newEnv(t *testing.T) *env {
 		SSO: sso.NewClient(nil), IssuerFor: func(string, string) string { return fake.URL },
 		SessionSecret: testSessionSecret, EncryptionKey: testEncKey,
 		Auth: am, Limiter: auth.NewLimiter(), ThemesPath: themesRoot,
-		PlatformHostname: platformHost, RootPasswordHash: rootHash, Dev: true,
+		PlatformHostname: platformHost, RootPasswordHash: rootHash,
 	})
 
 	// A cut-down version of server's host resolution, so these tests drive

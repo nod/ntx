@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -57,7 +58,12 @@ func (h *Handler) Section(w http.ResponseWriter, r *http.Request) {
 			h.serverError(w, err)
 			return
 		}
-		if !tc.Has(tmplName) {
+		has, err := tc.Has(tmplName)
+		if err != nil {
+			h.serverError(w, fmt.Errorf("site %q: theme %q: %w", site.Key, site.Theme, err))
+			return
+		}
+		if !has {
 			h.notFound(w)
 			return
 		}

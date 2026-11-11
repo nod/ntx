@@ -82,7 +82,7 @@ func TestPlatformProviderSaveAndClear(t *testing.T) {
 func TestPlatformSiteFormShowsCallbackURL(t *testing.T) {
 	e := newEnv(t)
 	page := e.do(http.MethodGet, platformHost, "/admin/platform/sites/a", nil, e.login(platformHost)).Body.String()
-	if !strings.Contains(page, "http://a.example.com/auth/callback") {
+	if !strings.Contains(page, "https://a.example.com/auth/callback") {
 		t.Fatalf("edit page lacks the site's callback URL: %s", page)
 	}
 }
