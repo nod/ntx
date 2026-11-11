@@ -69,3 +69,19 @@ func (l *Limiter) Release(ip string) {
 		}
 	}
 }
+
+// Sweep drops every IP with no failures left inside the window and
+// returns how many it dropped. An IP's entry is otherwise only trimmed
+// when that IP tries again; serve runs this periodically so IPs that
+// never return don't stay forever.
+func (l *Limiter) Sweep() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for ip := range l.failures {
+		if l.recent(ip) == nil {
+			n++
+		}
+	}
+	return n
+}

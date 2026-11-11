@@ -88,3 +88,38 @@ func TestLookupTouchesAtMostOncePerMinute(t *testing.T) {
 		t.Errorf("a lookup after a minute must move last_seen_at, still %v", s.LastSeenAt)
 	}
 }
+
+// Lookup refuses expired sessions; DeleteExpired removes them, using the
+// same rule, so the table doesn't grow forever.
+func TestDeleteExpiredSessions(t *testing.T) {
+	store, root, site := newSessionEnv(t)
+	short, err := store.Create(root.ID, &site.ID, "d", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	long, err := store.Create(root.ID, &site.ID, "d", 3*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(2 * time.Hour)
+	n, err := store.DeleteExpired(later)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("deleted %d sessions, want 1", n)
+	}
+	var left int64
+	if err := store.db.Model(&dbSession{}).Count(&left).Error; err != nil {
+		t.Fatal(err)
+	}
+	if left != 1 {
+		t.Errorf("%d sessions left, want 1", left)
+	}
+	if s, _ := store.Lookup(long, later); s == nil {
+		t.Error("the unexpired session was deleted")
+	}
+	if s, _ := store.Lookup(short, time.Now()); s != nil {
+		t.Error("the expired session is still there")
+	}
+}

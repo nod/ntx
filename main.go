@@ -57,6 +57,7 @@ func rootCmd() *cobra.Command {
 
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
+			go a.sweepEvery(ctx, sweepInterval)
 
 			go func() {
 				log.Printf("listening on %s (sign in as root on %s)", srv.Addr, a.cfg.PlatformHostname)
@@ -194,7 +195,36 @@ type app struct {
 	registry *sitereg.Registry
 	auth     *auth.Manager
 	handler  *handlers.Handler
+	users    *models.UserStore
+	sessions *models.SessionStore
+	limiter  *auth.Limiter // the handlers' sign-in limiter
 	close    func()
+}
+
+// sweepInterval is how often serve deletes expired sessions and forgets
+// sign-in failures that have left the limiter's window.
+const sweepInterval = 10 * time.Minute
+
+// sweep runs one cleanup pass.
+func (a *app) sweep(now time.Time) {
+	if _, err := a.sessions.DeleteExpired(now); err != nil {
+		log.Printf("deleting expired sessions: %v", err)
+	}
+	a.limiter.Sweep()
+}
+
+// sweepEvery runs sweep every interval until ctx ends.
+func (a *app) sweepEvery(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			a.sweep(now)
+		}
+	}
 }
 
 func openApp(cfgFile string) (*app, error) {
@@ -227,6 +257,7 @@ func openApp(cfgFile string) (*app, error) {
 	ids := models.NewIdentityStore(database)
 	invites := models.NewInviteStore(database)
 	sessions := models.NewSessionStore(database)
+	limiter := auth.NewLimiter()
 	am := auth.NewManager(sessions, users, mems, cfg.RootPasswordHash, !cfg.Dev)
 	h := handlers.New(handlers.Deps{
 		Sites:            sites,
@@ -242,13 +273,16 @@ func openApp(cfgFile string) (*app, error) {
 		EncryptionKey:    cfg.EncryptionKey,
 		Registry:         reg,
 		Auth:             am,
-		Limiter:          auth.NewLimiter(),
+		Limiter:          limiter,
 		ThemesPath:       cfg.ThemesPath,
 		PlatformHostname: cfg.PlatformHostname,
 		RootPasswordHash: cfg.RootPasswordHash,
 		Dev:              cfg.Dev,
 	})
-	return &app{cfg: cfg, registry: reg, auth: am, handler: h, close: closeDB}, nil
+	return &app{
+		cfg: cfg, registry: reg, auth: am, handler: h,
+		users: users, sessions: sessions, limiter: limiter, close: closeDB,
+	}, nil
 }
 
 // hashRootPassword bcrypts a password typed for root_password_hash,
