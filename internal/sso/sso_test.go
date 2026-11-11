@@ -142,8 +142,32 @@ func TestExchangeWrongVerifier(t *testing.T) {
 	f := sso.NewFlow(1, "", time.Now())
 	other := f
 	other.Verifier = sso.NewFlow(1, "", time.Now()).Verifier
-	if _, err := signIn(t, sso.NewClient(nil), settings(fake), fake, f, other); !errors.Is(err, sso.ErrProvider) {
-		t.Fatalf("Exchange with the wrong PKCE verifier = %v, want ErrProvider", err)
+	if _, err := signIn(t, sso.NewClient(nil), settings(fake), fake, f, other); !errors.Is(err, sso.ErrCodeRejected) {
+		t.Fatalf("Exchange with the wrong PKCE verifier = %v, want ErrCodeRejected", err)
+	}
+}
+
+// The provider answered: a refused code or client is not "unreachable".
+func TestExchangeRejections(t *testing.T) {
+	fake := ssotest.New(t)
+	c := sso.NewClient(nil)
+	s := settings(fake)
+	fake.SetNext(ssotest.Identity{Subject: "s", Email: "a@x.io", EmailVerified: true})
+	f := sso.NewFlow(1, "", time.Now())
+	authURL, err := c.AuthCodeURL(context.Background(), s, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, _ := url.Parse(fake.Authorize(t, authURL))
+	code := back.Query().Get("code")
+
+	wrong := s
+	wrong.ClientSecret = "not-the-secret"
+	if _, err := c.Exchange(context.Background(), wrong, code, f); !errors.Is(err, sso.ErrClientRejected) || errors.Is(err, sso.ErrProvider) {
+		t.Errorf("wrong client secret = %v, want ErrClientRejected only", err)
+	}
+	if _, err := c.Exchange(context.Background(), s, code, f); !errors.Is(err, sso.ErrCodeRejected) || errors.Is(err, sso.ErrProvider) {
+		t.Errorf("a code already tried = %v, want ErrCodeRejected only", err)
 	}
 }
 

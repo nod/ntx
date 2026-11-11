@@ -154,6 +154,12 @@ never shown again; the form says whether one is stored. Changing the provider,
 domain or client ID requires entering the secret again. If you change
 `encryption_key`, re-enter every site's client secret.
 
+If sign-in fails with "rejected this site's client ID or secret", the provider
+answered but refused the credentials: check the client ID and re-enter the
+secret. "Couldn't reach the sign-in provider" means it didn't answer usefully
+at all. A code the provider refuses (expired, or the callback page reloaded)
+just shows "Your sign-in expired" and the person signs in again.
+
 ### Members and invites
 
 On a site, **members** lists its people and pending invites. Site admins (and
