@@ -201,7 +201,7 @@ A site has:
 | key | lowercase letters, digits, `-`, `_`; set once at creation; names its `ntx generate` output folder |
 | hostname | bare hostname (no scheme, port or path), unique |
 | name, description | template variables |
-| about slug | `/about` redirects to `/blog/<about slug>` |
+| about slug | `/about` redirects to `/blog/<about slug>`; a post slug (lowercase letters, digits, single hyphens), `about` if empty |
 | theme | one of the folders in `themes_path` |
 
 Posts and tags are scoped per site, so two sites may use the same post slug or

@@ -162,6 +162,10 @@ func normalizeSite(d *gorm.DB, site *Site, platformHostname string, excludeID in
 	if site.AboutSlug == "" {
 		site.AboutSlug = "about"
 	}
+	// /about redirects to /blog/<about slug>: it names a post.
+	if !slugRe.MatchString(site.AboutSlug) {
+		return invalid("about page %q must be a post slug: lowercase letters and digits, words joined by single hyphens", site.AboutSlug)
+	}
 	if err := validate.Hostname(site.Hostname); err != nil {
 		return invalid("%s", err)
 	}

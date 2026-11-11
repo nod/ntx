@@ -156,6 +156,35 @@ func TestHostnameChangeDeletesSessions(t *testing.T) {
 	}
 }
 
+// /about redirects to /blog/<about slug>, so it follows the post slug rule;
+// empty means "about".
+func TestAboutSlugFollowsPostSlugRule(t *testing.T) {
+	d := newTestSiteDB(t)
+	s := NewSiteStore(d)
+	a := mustCreateSite(t, s, "a", "a.example.com")
+	for _, bad := range []string{"a/b", "../x", "x?y=1", "has space", "Caps", "-x", "x--y"} {
+		site := *a
+		site.AboutSlug = bad
+		if err := s.Update(&site, testPlatformHost); !isValidation(err) {
+			t.Errorf("about slug %q: expected *ValidationError, got %v", bad, err)
+		}
+	}
+	for in, want := range map[string]string{"my-page-2": "my-page-2", " me ": "me", "": "about"} {
+		site := *a
+		site.AboutSlug = in
+		if err := s.Update(&site, testPlatformHost); err != nil {
+			t.Errorf("about slug %q: %v", in, err)
+		}
+		if site.AboutSlug != want {
+			t.Errorf("about slug %q saved as %q, want %q", in, site.AboutSlug, want)
+		}
+	}
+	bad := &Site{Key: "b", Hostname: "b.example.com", Theme: "t", AboutSlug: "a/b"}
+	if err := s.Create(bad, testPlatformHost); !isValidation(err) {
+		t.Errorf("Create with about slug \"a/b\": expected *ValidationError, got %v", err)
+	}
+}
+
 func TestSetSectionsValidatesAndReplaces(t *testing.T) {
 	d := newTestSiteDB(t)
 	s := NewSiteStore(d)
